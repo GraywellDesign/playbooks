@@ -8,7 +8,7 @@ df -h
 
 # Step 2: Create a 1GB swap file
 echo "Creating swap file..."
-sudo fallocate -l 1G /swapfile
+sudo fallocate -l 2G /swapfile
 
 # Step 3: Check swap file creation
 ls -lh /swapfile
