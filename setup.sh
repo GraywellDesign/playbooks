@@ -8,7 +8,7 @@
 #  Log:   /opt/setup.log
 # ============================================================
 
-set -euo pipefail
+set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 # ── Colors & Logging ────────────────────────────────────────
@@ -195,8 +195,8 @@ SSH_PORT=${SSH_PORT:-22}
 if $SSHD_CHANGED; then
   # Validate config before restarting
   if sshd -t 2>/dev/null; then
-    systemctl restart sshd
-    fixed "sshd restarted with new config"
+    systemctl restart sshd 2>/dev/null && fixed "sshd restarted with new config" \
+      || warn "sshd restart failed — config saved but not active yet. Run: systemctl restart sshd"
   else
     bad "sshd config has errors — NOT restarting. Check $SSHD manually"
   fi
@@ -645,17 +645,13 @@ fixed "Ansible inventory and config written"
 GITHUB_REPO="https://github.com/GraywellDesign/ansible"
 
 info "Running ansible-pull from $GITHUB_REPO..."
-if ANSIBLE_LOG_PATH="/opt/ansible-setup.log" ansible-pull -U "$GITHUB_REPO" -i /etc/ansible/hosts setup.yml 2>/dev/null; then
-  fixed "ansible-pull setup.yml completed"
-else
-  warn "ansible-pull setup.yml failed or repo not reachable — check /opt/ansible-setup.log"
-fi
+ANSIBLE_LOG_PATH="/opt/ansible-setup.log" ansible-pull -U "$GITHUB_REPO" -i /etc/ansible/hosts setup.yml 2>/dev/null \
+  && fixed "ansible-pull setup.yml completed" \
+  || warn "ansible-pull setup.yml failed or repo not reachable — check /opt/ansible-setup.log"
 
-if ANSIBLE_LOG_PATH="/opt/ansible-setup.log" ansible-pull -U "$GITHUB_REPO" -i /etc/ansible/hosts playbooks/servers/server.yml 2>/dev/null; then
-  fixed "ansible-pull server.yml completed"
-else
-  warn "ansible-pull server.yml failed — check /opt/ansible-setup.log"
-fi
+ANSIBLE_LOG_PATH="/opt/ansible-setup.log" ansible-pull -U "$GITHUB_REPO" -i /etc/ansible/hosts playbooks/servers/server.yml 2>/dev/null \
+  && fixed "ansible-pull server.yml completed" \
+  || warn "ansible-pull server.yml failed — check /opt/ansible-setup.log"
 
 # ──────────────────────────────────────────
 # DONE
