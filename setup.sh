@@ -34,12 +34,20 @@ log "=== Setup started on $(hostname) at $(date) ==="
 # ──────────────────────────────────────────
 # CREDENTIALS (prompted once at start)
 # ──────────────────────────────────────────
-echo -e "${BOLD}Brevo SMTP credentials needed for SSH login alerts.${NC}"
-echo -e "Get these from: Brevo → SMTP & API → SMTP tab\n"
-read -rp "  Brevo SMTP username (usually your email): " BREVO_USER
+echo -e "${BOLD}A few credentials are needed before setup begins.${NC}\n"
+
+echo -e "${BOLD}Brevo SMTP${NC} (for SSH login + watchdog alerts)"
+echo -e "Get these from: Brevo → Transactional → SMTP & API → SMTP tab\n"
+read -rp  "  Brevo SMTP username (usually your email): " BREVO_USER
 read -rsp "  Brevo SMTP password (your SMTP key):      " BREVO_PASS
 echo ""
 ALERT_EMAIL="security@graywelldesign.com"
+
+echo ""
+echo -e "${BOLD}MySQL Root Password${NC}"
+echo -e "This will be set as the MySQL root password and stored in /root/.my.cnf\n"
+read -rsp "  MySQL root password (leave blank to skip): " MYSQL_ROOT_PASS
+echo ""
 echo ""
 
 # ──────────────────────────────────────────
@@ -336,11 +344,47 @@ if command -v mysql &>/dev/null || command -v mysqld &>/dev/null; then
     ok "MySQL/MariaDB is locally bound only"
   fi
 
-  # Check anonymous root access
-  if mysql -u root --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
-    bad "MySQL root accessible without password — run mysql_secure_installation"
+  # Set root password if provided and MySQL currently has no password
+  if [ -n "${MYSQL_ROOT_PASS:-}" ]; then
+    if mysql -u root --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
+      # No password set — set it now
+      mysql -u root --connect-timeout=3 \
+        -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASS}'; FLUSH PRIVILEGES;" \
+        2>/dev/null \
+        && fixed "MySQL root password set" \
+        || {
+          # Try MariaDB syntax as fallback
+          mysql -u root --connect-timeout=3 \
+            -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${MYSQL_ROOT_PASS}'); FLUSH PRIVILEGES;" \
+            2>/dev/null \
+            && fixed "MySQL root password set (MariaDB)" \
+            || bad "Could not set MySQL root password — set manually"
+        }
+    else
+      ok "MySQL root already has a password — skipping"
+    fi
+  fi
+
+  # Write /root/.my.cnf so root can connect without typing password
+  if [ -n "${MYSQL_ROOT_PASS:-}" ]; then
+    cat > /root/.my.cnf <<EOF
+[client]
+user=root
+password=${MYSQL_ROOT_PASS}
+EOF
+    chmod 600 /root/.my.cnf
+    fixed "MySQL credentials saved to /root/.my.cnf"
+  elif [ -f /root/.my.cnf ]; then
+    ok "/root/.my.cnf already exists"
   else
-    ok "MySQL root requires authentication"
+    warn "No MySQL root password provided — watchdog MySQL check may fail if password is set"
+  fi
+
+  # Verify connectivity
+  if mysql -u root --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
+    ok "MySQL root authentication working"
+  else
+    bad "MySQL root not accessible — run mysql_secure_installation manually"
   fi
 else
   info "MySQL/MariaDB not installed — skipping"
