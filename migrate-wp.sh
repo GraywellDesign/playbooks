@@ -28,9 +28,41 @@ section() { echo -e "\n${BOLD}${BLU}══════════════�
 
 [ "$EUID" -ne 0 ] && { echo "Run as root: sudo bash $0"; exit 1; }
 
+# ──────────────────────────────────────────
+# INSTALL SSH KEY FOR MIGRATION
+# ──────────────────────────────────────────
+ERIC_MIGRATION_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEA8e9ivGIdG7os4/5KB7IR0gwSZUfpgwqGImlhjyF1R3gID3VXRhM3KZYW1Rp6M0TzTGb98mkA4M8Uj7BWkp4yUKvVGbQpO+AWzGGsiTCTEH5E1Ne5QaAzxuv6ZuwnqY2ga6peia/OtdJiACUN5MXxem04eLnmLINr59FIPNB/KfLJ8Z9r8tSevn1Jd/emMMTXqaxEry4ltrdsSWcNaWO5ecVdqceIgoGovJxx0iivkqwKtrHF4gKO44y1O3oGE4fnEH6oicVCBXMB3eeqObvSIY7/haOWFJiqmKBOoUXPOumZJHNhuQumtO17mMscUe8sLoQuWswlJd5lg7Vs0bGl+Q== esalas-migration"
+
+# Ensure root has a keypair for outbound SSH
+if [ ! -f /root/.ssh/id_rsa ] && [ ! -f /root/.ssh/id_ed25519 ]; then
+  ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -q
+  echo "Generated new SSH keypair at /root/.ssh/id_ed25519"
+fi
+
+# Install the migration public key into root's authorized_keys
+# (allows the script to also be used in reverse if needed)
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+if ! grep -qF "esalas-migration" /root/.ssh/authorized_keys 2>/dev/null; then
+  echo "$ERIC_MIGRATION_KEY" >> /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+fi
+
+# Determine which private key to use for outbound connections
+SSH_KEY=""
+for key in /root/.ssh/id_ed25519 /root/.ssh/id_rsa /home/esalas/.ssh/id_ed25519 /home/esalas/.ssh/id_rsa; do
+  [ -f "$key" ] && { SSH_KEY="$key"; break; }
+done
+
 echo -e "\n${BOLD}Graywell WordPress Migration Script${NC}"
 echo -e "Destination: $(hostname) | $(date)\n"
 echo "$(date '+%Y-%m-%d %H:%M:%S') === Migration started on $(hostname) ===" >> "$LOG"
+
+if [ -n "$SSH_KEY" ]; then
+  echo -e "  ${BLU}[INFO]${NC}    Using SSH key: $SSH_KEY"
+else
+  echo -e "  ${YEL}[WARN]${NC}    No SSH private key found — you will need to specify one"
+fi
 
 # ──────────────────────────────────────────
 # DETECT DESTINATION ENVIRONMENT
@@ -61,9 +93,9 @@ read -rp "  Source server IP or hostname: " SRC_HOST
 read -rp "  SSH user on source server (e.g. bitnami, root, esalas): " SRC_USER
 read -rp "  SSH port (default 22): " SRC_PORT
 SRC_PORT=${SRC_PORT:-22}
-read -rp "  Path to SSH private key (default: ~/.ssh/id_rsa): " SRC_KEY
-SRC_KEY=${SRC_KEY:-~/.ssh/id_rsa}
-[ ! -f "$SRC_KEY" ] && SRC_KEY=$(ls ~/.ssh/id_* 2>/dev/null | grep -v ".pub" | head -1 || echo "")
+read -rp "  Path to SSH private key (default: ${SSH_KEY:-~/.ssh/id_rsa}): " SRC_KEY_INPUT
+SRC_KEY=${SRC_KEY_INPUT:-${SSH_KEY:-~/.ssh/id_rsa}}
+[ ! -f "$SRC_KEY" ] && SRC_KEY=$(ls /root/.ssh/id_* /home/esalas/.ssh/id_* 2>/dev/null | grep -v "\.pub" | head -1 || echo "")
 
 echo ""
 read -rp "  Domain name for this site (e.g. example.com): " DOMAIN
