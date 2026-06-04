@@ -324,10 +324,15 @@ check_phpfpm() {
 check_disk() {
   local alerted=false
 
+  # Use full df output: Filesystem Size Used Avail Use% Mounted
   while IFS= read -r line; do
     local usage mount
     usage=$(echo "$line" | awk '{print $5}' | tr -d '%')
     mount=$(echo "$line" | awk '{print $6}')
+
+    # Skip empty or header lines
+    [ -z "$usage" ] || [ -z "$mount" ] && continue
+    [[ "$usage" =~ ^[0-9]+$ ]] || continue
 
     # Skip irrelevant mounts
     [[ "$mount" =~ ^/(dev|sys|proc|run) ]] && continue
@@ -361,7 +366,7 @@ check_disk() {
       set_state "disk_${mount//\//_}" "ok"
       log_ok "Disk $mount at ${usage}%"
     fi
-  done < <(df -h --output=pcent,target 2>/dev/null | tail -n +2)
+  done < <(df -h 2>/dev/null | tail -n +2)
 }
 
 check_memory() {

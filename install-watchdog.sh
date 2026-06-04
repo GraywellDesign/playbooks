@@ -51,7 +51,7 @@ After=network.target mysql.service mariadb.service apache2.service nginx.service
 [Service]
 Type=oneshot
 ExecStart=/opt/scripts/watchdog.sh
-StandardOutput=append:/var/log/graywell-watchdog.log
+StandardOutput=null
 StandardError=append:/var/log/graywell-watchdog.log
 EOF
 
