@@ -224,15 +224,54 @@ apply_ssh_setting "PermitEmptyPasswords"   "no"                "Empty passwords"
 apply_ssh_setting "X11Forwarding"          "no"                "X11 forwarding"
 apply_ssh_setting "MaxAuthTries"           "3"                 "MaxAuthTries"
 
-# AllowUsers — only add if not already set; include esalas, bitnami (if present), and root
+# AllowUsers — build a comprehensive list that includes ALL existing shell users
+# so we never accidentally lock anyone out
 if ! grep -qiE "^AllowUsers\s" "$SSHD"; then
+  # Start with known admin users
   ALLOW_LIST="esalas root"
-  id bitnami &>/dev/null && ALLOW_LIST="esalas bitnami root"
+
+  # Add any existing human shell users (UID >= 1000) that have SSH keys
+  for user in $(awk -F: '($3>=1000) && ($7 !~ /nologin|false/) {print $1}' /etc/passwd 2>/dev/null); do
+    if [ -f "/home/${user}/.ssh/authorized_keys" ] || [ -f "/home/${user}/.ssh/id_rsa" ] || [ -f "/home/${user}/.ssh/id_ed25519" ]; then
+      echo "$ALLOW_LIST" | grep -qw "$user" || ALLOW_LIST="$ALLOW_LIST $user"
+    fi
+  done
+
+  # Always include the cloud provider default user
+  for cloud_user in ubuntu bitnami admin ec2-user debian; do
+    id "$cloud_user" &>/dev/null && echo "$ALLOW_LIST" | grep -qw "$cloud_user" || {
+      id "$cloud_user" &>/dev/null && ALLOW_LIST="$ALLOW_LIST $cloud_user"
+    }
+  done
+
   echo "AllowUsers $ALLOW_LIST" >> "$SSHD"
   fixed "AllowUsers set to: $ALLOW_LIST"
   SSHD_CHANGED=true
 else
-  ok "AllowUsers already configured: $(grep -iE "^AllowUsers" "$SSHD")"
+  # AllowUsers already set — make sure esalas and cloud users are included
+  CURRENT_ALLOW=$(grep -iE "^AllowUsers\s" "$SSHD" | sed 's/AllowUsers\s*//')
+  NEEDS_UPDATE=false
+  ADD_USERS=""
+
+  # Check esalas is included
+  echo "$CURRENT_ALLOW" | grep -qw "esalas" || { ADD_USERS="$ADD_USERS esalas"; NEEDS_UPDATE=true; }
+
+  # Check cloud default users
+  for cloud_user in ubuntu bitnami; do
+    id "$cloud_user" &>/dev/null && ! echo "$CURRENT_ALLOW" | grep -qw "$cloud_user" && {
+      ADD_USERS="$ADD_USERS $cloud_user"
+      NEEDS_UPDATE=true
+    }
+  done
+
+  if $NEEDS_UPDATE; then
+    NEW_ALLOW="$CURRENT_ALLOW $ADD_USERS"
+    sed -i "s/^AllowUsers.*/AllowUsers $NEW_ALLOW/" "$SSHD"
+    fixed "AllowUsers updated to include: $ADD_USERS"
+    SSHD_CHANGED=true
+  else
+    ok "AllowUsers already configured: $(grep -iE "^AllowUsers" "$SSHD")"
+  fi
 fi
 
 # Port — warn if still 22, don't change automatically (too risky)
@@ -242,6 +281,16 @@ SSH_PORT=${SSH_PORT:-22}
   || ok "SSH on non-default port $SSH_PORT"
 
 if $SSHD_CHANGED; then
+  # Safety check — make sure the current SSH session user is in AllowUsers
+  CURRENT_SESSION_USER="${SUDO_USER:-$(whoami)}"
+  ALLOW_LINE=$(grep -iE "^AllowUsers\s" "$SSHD" || echo "")
+  if [ -n "$ALLOW_LINE" ] && ! echo "$ALLOW_LINE" | grep -qw "$CURRENT_SESSION_USER"; then
+    bad "SAFETY CHECK FAILED: Current user '$CURRENT_SESSION_USER' is not in AllowUsers!"
+    bad "Adding $CURRENT_SESSION_USER to AllowUsers to prevent lockout..."
+    sed -i "s/^AllowUsers.*/& $CURRENT_SESSION_USER/" "$SSHD"
+    warn "Added $CURRENT_SESSION_USER to AllowUsers — verify sshd_config before restarting"
+  fi
+
   # Validate config — try both common paths
   SSHD_BIN=$(command -v sshd || echo "/usr/sbin/sshd")
   if $SSHD_BIN -t 2>/dev/null; then
@@ -508,12 +557,22 @@ else
       ok "WP_DEBUG already off"
     fi
 
-    # PHP files in uploads (flag only — don't delete automatically)
+    # PHP files in uploads — flag suspicious ones, ignore known plugin data dirs
     UPLOADS="$WP_DIR/wp-content/uploads"
     if [ -d "$UPLOADS" ]; then
-      PHP_IN_UPLOADS=$(find "$UPLOADS" -name "*.php" 2>/dev/null | grep -v "index.php" || true)
+      PHP_IN_UPLOADS=$(find "$UPLOADS" -name "*.php" 2>/dev/null \
+        | grep -v "index\.php" \
+        | grep -v "/sucuri/" \
+        | grep -v "/wpo/" \
+        | grep -v "/mailpoet/" \
+        | grep -v "/iwc-logs/" \
+        | grep -v "/elementor/" \
+        | grep -v "/wp-rocket/" \
+        | grep -v "/w3tc/" \
+        | grep -v "/cache/" \
+        || true)
       if [ -n "$PHP_IN_UPLOADS" ]; then
-        bad "Non-index PHP files found in uploads — possible webshells:"
+        bad "Suspicious PHP files found in uploads — possible webshells:"
         echo "$PHP_IN_UPLOADS" | sed 's/^/    /'
         warn "Review these manually before deleting"
       else
