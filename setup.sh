@@ -863,9 +863,9 @@ echo -e "\n${BOLD}Summary log: $LOG${NC}"
 echo -e "Ansible log: /opt/ansible-setup.log\n"
 
 # Only count and show entries from this run (lines added after RUN_START_LINE)
-FIXED_COUNT=$(tail -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FIXED\]" || echo 0)
-WARN_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[WARN\]"  || echo 0)
-FAIL_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FAIL\]"  || echo 0)
+FIXED_COUNT=$(tail -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FIXED\]" 2>/dev/null || true); FIXED_COUNT=${FIXED_COUNT:-0}
+WARN_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[WARN\]"  2>/dev/null || true); WARN_COUNT=${WARN_COUNT:-0}
+FAIL_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FAIL\]"  2>/dev/null || true); FAIL_COUNT=${FAIL_COUNT:-0}
 
 echo -e "  ${GRN}Fixed:${NC}    $FIXED_COUNT items"
 echo -e "  ${YEL}Warnings:${NC} $WARN_COUNT items"
