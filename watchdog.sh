@@ -38,9 +38,10 @@ send_alert() {
   local server_ip
   server_ip=$(hostname -I | awk '{print $1}')
   local full_subject="[$host] $subject"
-  [ "$priority" = "critical" ] && full_subject="🚨 CRITICAL [$host] $subject"
+  [ "$priority" = "critical" ] && full_subject="[CRITICAL] [$host] $subject"
 
-  echo -e "Subject: ${full_subject}\n\n${body}\n\n--\nServer: ${host} (${server_ip})\nTime: $(ts)\nLog: ${LOG}" \
+  printf "Subject: %s\nMIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n--\nServer: %s (%s)\nTime: %s\nLog: %s" \
+    "${full_subject}" "${body}" "${host}" "${server_ip}" "$(ts)" "${LOG}" \
     | /usr/bin/msmtp "$ALERT_EMAIL" 2>/dev/null \
     || log "[WARN] Failed to send alert email: $subject"
 }

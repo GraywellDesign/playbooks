@@ -676,14 +676,14 @@ DATE=$(date '+%Y-%m-%d %H:%M:%S UTC')
 # PAM_TYPE is 'open_session' (login) or 'close_session' (logout)
 if [ "$PAM_TYPE" = "open_session" ]; then
   EVENT="LOGIN"
-  EMOJI="🔐"
+  EVENT_SYMBOL=">>>"
 else
   EVENT="LOGOUT"
-  EMOJI="🔓"
+  EVENT_SYMBOL="<<<"
 fi
 
 SUBJECT="[$HOST] SSH ${EVENT}: ${PAM_USER} from ${PAM_RHOST}"
-BODY="${EMOJI} SSH ${EVENT} on ${HOST}
+BODY="${EVENT_SYMBOL} SSH ${EVENT} on ${HOST}
 
 User:      ${PAM_USER}
 From IP:   ${PAM_RHOST}
@@ -691,7 +691,8 @@ Service:   ${PAM_SERVICE}
 Time:      ${DATE}
 Server IP: ${IP}"
 
-echo -e "Subject: ${SUBJECT}\n\n${BODY}" | /usr/bin/msmtp "$ALERT_TO" 2>/dev/null || true
+printf "Subject: %s\nMIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\n\n%s" \
+  "${SUBJECT}" "${BODY}" | /usr/bin/msmtp "$ALERT_TO" 2>/dev/null || true
 SCRIPT
 
 chmod 700 "$ALERT_SCRIPT"
