@@ -63,6 +63,10 @@ should_alert() {
 IS_BITNAMI=false
 [ -d /opt/bitnami ] && IS_BITNAMI=true
 
+# MySQL credentials — explicit path so systemd finds it regardless of HOME
+MYSQL_OPTS="--defaults-file=/root/.my.cnf --connect-timeout=5"
+[ ! -f /root/.my.cnf ] && MYSQL_OPTS="--connect-timeout=5"
+
 restart_service() {
   local service="$1"   # mysql, apache, nginx, php-fpm
   local friendly="$2"
@@ -136,7 +140,7 @@ check_mysql() {
 
   # Process exists — now test actual query response
   local query_result
-  query_result=$(mysql -u root --connect-timeout=5 -e "SELECT 1" 2>/dev/null)
+  query_result=$(mysql $MYSQL_OPTS -e "SELECT 1" 2>/dev/null)
   if [ $? -ne 0 ] || [ -z "$query_result" ]; then
     log "[FAIL] MySQL process running but not responding to queries"
 
