@@ -70,21 +70,29 @@ restart_service() {
 
   if $IS_BITNAMI; then
     case "$service" in
-      mysql|mariadb) /opt/bitnami/ctlscript.sh restart mariadb 2>/dev/null & ;;
-      apache)        /opt/bitnami/ctlscript.sh restart apache  2>/dev/null & ;;
-      nginx)         /opt/bitnami/ctlscript.sh restart nginx   2>/dev/null & ;;
-      php-fpm)       /opt/bitnami/ctlscript.sh restart php-fpm 2>/dev/null & ;;
+      mysql|mariadb) /opt/bitnami/ctlscript.sh restart mariadb >> "$LOG" 2>&1 ;;
+      apache)        /opt/bitnami/ctlscript.sh restart apache  >> "$LOG" 2>&1 ;;
+      nginx)         /opt/bitnami/ctlscript.sh restart nginx   >> "$LOG" 2>&1 ;;
+      php-fpm)       /opt/bitnami/ctlscript.sh restart php-fpm >> "$LOG" 2>&1 ;;
     esac
   else
-    systemctl restart "$service" 2>/dev/null &
+    systemctl restart "$service" >> "$LOG" 2>&1
   fi
 
-  # Wait up to 15s for restart
-  sleep 15
+  # Wait for service to stabilize
+  sleep 5
 
   # Return whether it's back up
-  systemctl is-active --quiet "$service" 2>/dev/null \
-    || pgrep -x "${service%%.*}" &>/dev/null
+  if systemctl is-active --quiet "$service" 2>/dev/null; then
+    log "[RESTART] $friendly is active after restart"
+    return 0
+  elif pgrep -f "$service" &>/dev/null; then
+    log "[RESTART] $friendly process found after restart"
+    return 0
+  else
+    log "[RESTART] $friendly still not running after restart"
+    return 1
+  fi
 }
 
 # ── Checks ──────────────────────────────────────────────────
@@ -99,11 +107,7 @@ check_mysql() {
 
     if should_alert "mysql" "warning"; then
       set_state "mysql" "warning"
-      restart_service "$service_name" "MySQL/MariaDB"
-
-      # Check if restart worked
-      sleep 5
-      if pgrep -x mysqld &>/dev/null || pgrep -x mariadbd &>/dev/null; then
+      if restart_service "$service_name" "MySQL/MariaDB"; then
         log "[RECOVER] MySQL restarted successfully"
         send_alert "MySQL restarted automatically" \
           "MySQL/MariaDB was down and has been automatically restarted.\n\nStatus: RECOVERED\nAction taken: systemctl restart $service_name"
@@ -366,7 +370,7 @@ check_disk() {
       set_state "disk_${mount//\//_}" "ok"
       log_ok "Disk $mount at ${usage}%"
     fi
-  done < <(df -h 2>/dev/null | tail -n +2)
+  done < <(df -Pk 2>/dev/null | tail -n +2)
 }
 
 check_memory() {
