@@ -173,17 +173,17 @@ section "5. MySQL Benchmark"
 
 if command -v mysql &>/dev/null || command -v mysqld &>/dev/null; then
   # Get current MySQL stats
-  MYSQL_CONN=$(mysql -u root --connect-timeout=3 \
+  MYSQL_CONN=$(mysql --defaults-file=/root/.my.cnf --connect-timeout=3 \
     -e "SHOW STATUS LIKE 'Threads_connected';" 2>/dev/null \
     | grep Threads_connected | awk '{print $2}')
-  MYSQL_MAX=$(mysql -u root --connect-timeout=3 \
+  MYSQL_MAX=$(mysql --defaults-file=/root/.my.cnf --connect-timeout=3 \
     -e "SHOW VARIABLES LIKE 'max_connections';" 2>/dev/null \
     | grep max_connections | awk '{print $2}')
-  MYSQL_BUFFER=$(mysql -u root --connect-timeout=3 \
+  MYSQL_BUFFER=$(mysql --defaults-file=/root/.my.cnf --connect-timeout=3 \
     -e "SHOW VARIABLES LIKE 'innodb_buffer_pool_size';" 2>/dev/null \
     | grep innodb_buffer_pool_size | awk '{print $2}')
   MYSQL_BUFFER_MB=$(echo "scale=0; ${MYSQL_BUFFER:-0}/1024/1024" | bc 2>/dev/null || echo 0)
-  SLOW_QUERIES=$(mysql -u root --connect-timeout=3 \
+  SLOW_QUERIES=$(mysql --defaults-file=/root/.my.cnf --connect-timeout=3 \
     -e "SHOW STATUS LIKE 'Slow_queries';" 2>/dev/null \
     | grep Slow_queries | awk '{print $2}')
 
@@ -193,35 +193,32 @@ if command -v mysql &>/dev/null || command -v mysqld &>/dev/null; then
 
   # Quick sysbench MySQL test
   info "Running MySQL benchmark..."
-  mysql -u root --connect-timeout=3 \
+
+  # Read password from .my.cnf for sysbench
+  MYSQL_ROOT_PW=$(awk -F= '/^password/{print $2}' /root/.my.cnf 2>/dev/null | tr -d ' ')
+  SYSBENCH_MYSQL_OPTS="--db-driver=mysql --mysql-user=root --mysql-db=sbtest"
+  [ -n "$MYSQL_ROOT_PW" ] && SYSBENCH_MYSQL_OPTS="$SYSBENCH_MYSQL_OPTS --mysql-password=${MYSQL_ROOT_PW}"
+
+  mysql --defaults-file=/root/.my.cnf --connect-timeout=3 \
     -e "CREATE DATABASE IF NOT EXISTS sbtest;" 2>/dev/null || true
 
-  MYSQL_BENCH=$(sysbench oltp_read_only \
-    --db-driver=mysql \
-    --mysql-user=root \
-    --mysql-db=sbtest \
-    --tables=1 \
-    --table-size=10000 \
-    prepare 2>/dev/null && \
-  sysbench oltp_read_only \
-    --db-driver=mysql \
-    --mysql-user=root \
-    --mysql-db=sbtest \
-    --tables=1 \
-    --table-size=10000 \
-    --threads=4 \
-    --time=30 \
-    run 2>/dev/null | grep "queries:" | awk '{print $3}' | tr -d '(')
+  if sysbench oltp_read_only $SYSBENCH_MYSQL_OPTS \
+    --tables=1 --table-size=10000 prepare &>/dev/null; then
 
-  sysbench oltp_read_only \
-    --db-driver=mysql \
-    --mysql-user=root \
-    --mysql-db=sbtest \
-    cleanup 2>/dev/null || true
-  mysql -u root --connect-timeout=3 \
+    MYSQL_BENCH=$(sysbench oltp_read_only $SYSBENCH_MYSQL_OPTS \
+      --tables=1 --table-size=10000 --threads=4 --time=30 \
+      run 2>/dev/null | grep "queries:" | awk '{print $3}' | tr -d '(')
+
+    sysbench oltp_read_only $SYSBENCH_MYSQL_OPTS \
+      --tables=1 cleanup &>/dev/null || true
+
+    result "MySQL queries/sec: ${MYSQL_BENCH:-n/a}"
+  else
+    warn "MySQL benchmark failed — check /root/.my.cnf credentials"
+  fi
+
+  mysql --defaults-file=/root/.my.cnf --connect-timeout=3 \
     -e "DROP DATABASE IF EXISTS sbtest;" 2>/dev/null || true
-
-  result "MySQL queries/sec: ${MYSQL_BENCH:-n/a}"
 else
   info "MySQL not installed — skipping"
 fi
