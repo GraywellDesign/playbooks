@@ -28,6 +28,7 @@ section(){ echo -e "\n${BOLD}${BLU}═══════════════
 
 echo -e "\n${BOLD}Graywell Server Setup & Security Hardening${NC}"
 echo -e "Started: $(date) | Host: $(hostname)\n"
+RUN_START_LINE=$(wc -l < "$LOG" 2>/dev/null || echo 0)
 log "=== Setup started on $(hostname) at $(date) ==="
 
 # ──────────────────────────────────────────
@@ -691,13 +692,21 @@ fi
 # ──────────────────────────────────────────
 section "15. Ansible & Playbooks"
 
-# Install Ansible
+# Install Ansible — use apt on Ubuntu 24.04+, pip3 on older versions
 if command -v ansible &>/dev/null; then
   ok "Ansible already installed: $(ansible --version | head -1)"
 else
   info "Installing Ansible..."
-  pip3 install ansible --quiet
-  fixed "Ansible installed"
+  UBUNTU_MAJOR=$(lsb_release -rs 2>/dev/null | cut -d. -f1)
+  if [ "${UBUNTU_MAJOR:-0}" -ge 24 ]; then
+    apt-get install -y -qq ansible \
+      && fixed "Ansible installed via apt" \
+      || warn "Ansible install failed — try manually: apt install ansible"
+  else
+    pip3 install ansible --quiet \
+      && fixed "Ansible installed via pip3" \
+      || warn "Ansible install failed — try manually: pip3 install ansible"
+  fi
 fi
 
 # Configure Ansible
@@ -746,9 +755,10 @@ section "Setup Complete"
 echo -e "\n${BOLD}Summary log: $LOG${NC}"
 echo -e "Ansible log: /opt/ansible-setup.log\n"
 
-FIXED_COUNT=$(grep -c "\[FIXED\]" "$LOG" 2>/dev/null || echo 0)
-WARN_COUNT=$(grep -c "\[WARN\]"  "$LOG" 2>/dev/null || echo 0)
-FAIL_COUNT=$(grep -c "\[FAIL\]"  "$LOG" 2>/dev/null || echo 0)
+# Only count and show entries from this run (lines added after RUN_START_LINE)
+FIXED_COUNT=$(tail -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FIXED\]" || echo 0)
+WARN_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[WARN\]"  || echo 0)
+FAIL_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FAIL\]"  || echo 0)
 
 echo -e "  ${GRN}Fixed:${NC}    $FIXED_COUNT items"
 echo -e "  ${YEL}Warnings:${NC} $WARN_COUNT items"
@@ -757,13 +767,13 @@ echo ""
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
   echo -e "${RED}Items needing manual attention:${NC}"
-  grep "\[FAIL\]" "$LOG" | sed 's/^/  /'
+  tail -n "+$RUN_START_LINE" "$LOG" | grep "\[FAIL\]" | sed 's/^/  /'
   echo ""
 fi
 
 if [ "$WARN_COUNT" -gt 0 ]; then
   echo -e "${YEL}Warnings to review:${NC}"
-  grep "\[WARN\]" "$LOG" | sed 's/^/  /'
+  tail -n "+$RUN_START_LINE" "$LOG" | grep "\[WARN\]" | sed 's/^/  /'
   echo ""
 fi
 
