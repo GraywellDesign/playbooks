@@ -737,6 +737,80 @@ fixed "Ansible inventory and config written"
 ok "Ansible ready — run playbooks manually as needed"
 
 # ──────────────────────────────────────────
+# 16. WATCHDOG MONITORING
+# ──────────────────────────────────────────
+section "16. Watchdog Monitoring"
+
+WATCHDOG_SCRIPT=/opt/scripts/watchdog.sh
+WATCHDOG_URL="https://raw.githubusercontent.com/GraywellDesign/playbooks/main/watchdog.sh"
+
+# Download/update watchdog script
+if [ -f "$WATCHDOG_SCRIPT" ]; then
+  # Update to latest version
+  wget -qO "$WATCHDOG_SCRIPT" "$WATCHDOG_URL" 2>/dev/null \
+    && ok "Watchdog script updated" \
+    || warn "Could not update watchdog script — using existing version"
+else
+  mkdir -p /opt/scripts
+  wget -qO "$WATCHDOG_SCRIPT" "$WATCHDOG_URL" 2>/dev/null \
+    && fixed "Watchdog script downloaded" \
+    || { warn "Could not download watchdog script — skipping watchdog install"; }
+fi
+
+if [ -f "$WATCHDOG_SCRIPT" ]; then
+  chmod 700 "$WATCHDOG_SCRIPT"
+
+  # Install systemd service
+  cat > /etc/systemd/system/graywell-watchdog.service <<'EOF'
+[Unit]
+Description=Graywell Server Watchdog
+After=network.target mysql.service mariadb.service apache2.service nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/scripts/watchdog.sh
+StandardOutput=null
+StandardError=append:/var/log/graywell-watchdog.log
+EOF
+
+  # Install systemd timer (every 60 seconds)
+  cat > /etc/systemd/system/graywell-watchdog.timer <<'EOF'
+[Unit]
+Description=Graywell Watchdog Timer — runs every 60 seconds
+Requires=graywell-watchdog.service
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  # Log rotation
+  cat > /etc/logrotate.d/graywell-watchdog <<'EOF'
+/var/log/graywell-watchdog.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+    create 640 root root
+}
+EOF
+
+  touch /var/log/graywell-watchdog.log
+  chmod 640 /var/log/graywell-watchdog.log
+
+  systemctl daemon-reload
+  systemctl enable graywell-watchdog.timer &>/dev/null
+  systemctl restart graywell-watchdog.timer 2>/dev/null \
+    && fixed "Watchdog timer enabled (60s interval)" \
+    || warn "Watchdog timer failed to start — check: systemctl status graywell-watchdog.timer"
+fi
+
+# ──────────────────────────────────────────
 # DONE
 # ──────────────────────────────────────────
 section "Setup Complete"
