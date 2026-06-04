@@ -74,12 +74,45 @@ fi
 UBUNTU_VER=$(lsb_release -rs 2>/dev/null || echo "unknown")
 info "Ubuntu version: $UBUNTU_VER"
 
-# Apache config path
+# Web server detection — Apache or Nginx?
+WEB_SERVER="none"
 APACHE_CONF=""
+NGINX_CONF=""
+
+# Check Apache
 for path in /opt/bitnami/apache/conf/httpd.conf /etc/apache2/apache2.conf /etc/httpd/conf/httpd.conf; do
-  [ -f "$path" ] && { APACHE_CONF="$path"; break; }
+  [ -f "$path" ] && { APACHE_CONF="$path"; WEB_SERVER="apache"; break; }
 done
-[ -n "$APACHE_CONF" ] && info "Apache config: $APACHE_CONF" || warn "Apache config not found"
+
+# Check Nginx (may coexist or replace Apache)
+for path in /opt/bitnami/nginx/conf/nginx.conf /etc/nginx/nginx.conf; do
+  [ -f "$path" ] && { NGINX_CONF="$path"; WEB_SERVER="nginx"; break; }
+done
+
+# If both present, Apache takes priority (Bitnami default)
+[ -n "$APACHE_CONF" ] && [ -n "$NGINX_CONF" ] && WEB_SERVER="apache"
+
+case "$WEB_SERVER" in
+  apache) info "Web server: Apache ($APACHE_CONF)" ;;
+  nginx)  info "Web server: Nginx ($NGINX_CONF)" ;;
+  none)   warn "No web server config found" ;;
+esac
+
+# SSL tool detection
+SSL_TOOL="none"
+if [ -f /opt/bitnami/bncert-tool ] || command -v bncert-tool &>/dev/null; then
+  SSL_TOOL="bncert"
+  info "SSL tool: Bitnami bncert"
+elif [ -f /opt/bitnami/letsencrypt/lego ]; then
+  SSL_TOOL="lego"
+  info "SSL tool: Bitnami lego"
+elif command -v certbot &>/dev/null; then
+  SSL_TOOL="certbot"
+  info "SSL tool: certbot"
+else
+  SSL_TOOL="none"
+  warn "No SSL management tool found — will check cert directly"
+fi
 
 # ──────────────────────────────────────────
 # 1. SYSTEM UPDATES
@@ -193,10 +226,15 @@ SSH_PORT=${SSH_PORT:-22}
   || ok "SSH on non-default port $SSH_PORT"
 
 if $SSHD_CHANGED; then
-  # Validate config before restarting
-  if sshd -t 2>/dev/null; then
-    systemctl restart sshd 2>/dev/null && fixed "sshd restarted with new config" \
-      || warn "sshd restart failed — config saved but not active yet. Run: systemctl restart sshd"
+  # Validate config — try both common paths
+  SSHD_BIN=$(command -v sshd || echo "/usr/sbin/sshd")
+  if $SSHD_BIN -t 2>/dev/null; then
+    # Debian/Ubuntu uses 'ssh', RHEL uses 'sshd'
+    SSH_SERVICE="ssh"
+    systemctl is-active --quiet sshd 2>/dev/null && SSH_SERVICE="sshd"
+    systemctl restart "$SSH_SERVICE" 2>/dev/null \
+      && fixed "sshd restarted with new config" \
+      || warn "sshd restart failed — config saved but not active yet. Run: systemctl restart $SSH_SERVICE"
   else
     bad "sshd config has errors — NOT restarting. Check $SSHD manually"
   fi
@@ -308,11 +346,23 @@ else
 fi
 
 # ──────────────────────────────────────────
-# 7. APACHE HARDENING
+# 7. WEB SERVER HARDENING
 # ──────────────────────────────────────────
-section "7. Apache Hardening"
+section "7. Web Server Hardening"
 
-if [ -n "$APACHE_CONF" ]; then
+restart_webserver() {
+  if $IS_BITNAMI; then
+    /opt/bitnami/ctlscript.sh restart "$1" &>/dev/null \
+      && fixed "$1 restarted (Bitnami)" \
+      || warn "$1 restart failed — check manually"
+  else
+    systemctl restart "$1" 2>/dev/null \
+      && fixed "$1 restarted" \
+      || warn "$1 restart failed — check manually"
+  fi
+}
+
+if [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CONF" ]; then
   # ServerTokens
   if grep -q "^ServerTokens Prod" "$APACHE_CONF" 2>/dev/null; then
     ok "ServerTokens already set to Prod"
@@ -331,15 +381,39 @@ if [ -n "$APACHE_CONF" ]; then
     fixed "ServerSignature set to Off"
   fi
 
-  # Restart Apache (Bitnami vs standard)
-  if $IS_BITNAMI; then
-    /opt/bitnami/ctlscript.sh restart apache &>/dev/null && fixed "Apache restarted (Bitnami)" || warn "Apache restart failed — check manually"
+  restart_webserver "apache"
+
+elif [ "$WEB_SERVER" = "nginx" ] && [ -n "$NGINX_CONF" ]; then
+  # Nginx: server_tokens off (hides version number)
+  # Check in main config and conf.d/snippets
+  NGINX_CONF_DIR=$(dirname "$NGINX_CONF")
+  TOKEN_SET=$(grep -r "server_tokens off" "$NGINX_CONF_DIR" 2>/dev/null | grep -v "#" | head -1)
+
+  if [ -n "$TOKEN_SET" ]; then
+    ok "server_tokens already off in Nginx"
   else
-    systemctl restart apache2 2>/dev/null || systemctl restart httpd 2>/dev/null || warn "Apache restart failed"
-    fixed "Apache restarted"
+    # Add to http block in nginx.conf
+    if grep -q "http {" "$NGINX_CONF" 2>/dev/null; then
+      sed -i '/http {/a\\tserver_tokens off;' "$NGINX_CONF"
+      fixed "server_tokens off added to Nginx http block"
+    else
+      # Add to a separate security snippet
+      SNIPPET_DIR="$NGINX_CONF_DIR/conf.d"
+      mkdir -p "$SNIPPET_DIR"
+      echo "server_tokens off;" > "$SNIPPET_DIR/security.conf"
+      fixed "server_tokens off added to $SNIPPET_DIR/security.conf"
+    fi
   fi
+
+  # Validate and restart
+  if nginx -t &>/dev/null; then
+    restart_webserver "nginx"
+  else
+    bad "Nginx config test failed — NOT restarting. Check: nginx -t"
+  fi
+
 else
-  warn "Apache config not found — skipping Apache hardening"
+  warn "No web server config found — skipping web server hardening"
 fi
 
 # ──────────────────────────────────────────
@@ -417,23 +491,34 @@ WW_COUNT=$(find / -xdev -type f -perm -0002 \
 # ──────────────────────────────────────────
 section "10. SSL Certificate"
 
-if command -v certbot &>/dev/null || [ -f /opt/bitnami/letsencrypt/lego ]; then
-  ok "Let's Encrypt tooling present"
-  # Check cert expiry
-  if ss -tlnp 2>/dev/null | grep -q ":443 "; then
-    EXPIRY=$(echo | timeout 3 openssl s_client -connect "localhost:443" -servername "$(hostname)" 2>/dev/null \
-      | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
-    if [ -n "$EXPIRY" ]; then
-      EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null)
-      NOW_EPOCH=$(date +%s)
-      DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
-      [ "$DAYS_LEFT" -lt 30 ] \
-        && bad "SSL cert expires in $DAYS_LEFT days — renew soon" \
-        || ok "SSL cert valid for $DAYS_LEFT more days"
+case "$SSL_TOOL" in
+  bncert)  ok "SSL managed by Bitnami bncert" ;;
+  lego)    ok "SSL managed by Bitnami lego (auto-renew cron expected)" ;;
+  certbot) ok "SSL managed by certbot"
+           certbot certificates 2>/dev/null | grep -E "Domains:|Expiry Date:|VALID|EXPIRED" | sed 's/^/    /' ;;
+  none)    warn "No SSL management tool detected — ensure SSL is configured manually" ;;
+esac
+
+# Check actual cert expiry directly regardless of tool
+if ss -tlnp 2>/dev/null | grep -q ":443 "; then
+  EXPIRY=$(echo | timeout 5 openssl s_client -connect "localhost:443" -servername "$(hostname)" 2>/dev/null \
+    | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+  if [ -n "$EXPIRY" ]; then
+    EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null)
+    NOW_EPOCH=$(date +%s)
+    DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+    if [ "$DAYS_LEFT" -lt 14 ]; then
+      bad "SSL cert expires in $DAYS_LEFT days — renew IMMEDIATELY"
+    elif [ "$DAYS_LEFT" -lt 30 ]; then
+      warn "SSL cert expires in $DAYS_LEFT days — renew soon"
+    else
+      ok "SSL cert valid for $DAYS_LEFT more days"
     fi
+  else
+    warn "Could not read SSL cert on port 443 — verify SSL is working"
   fi
 else
-  warn "No Let's Encrypt tooling found — ensure SSL is configured"
+  warn "Nothing listening on port 443 — SSL may not be configured yet"
 fi
 
 # ──────────────────────────────────────────
