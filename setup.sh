@@ -734,18 +734,7 @@ fact_caching_connection = /tmp/ansible-facts
 EOF
 
 fixed "Ansible inventory and config written"
-
-# Pull and run playbooks from GitHub
-GITHUB_REPO="https://github.com/GraywellDesign/ansible"
-
-info "Running ansible-pull from $GITHUB_REPO..."
-ANSIBLE_LOG_PATH="/opt/ansible-setup.log" ansible-pull -U "$GITHUB_REPO" -i /etc/ansible/hosts setup.yml 2>/dev/null \
-  && fixed "ansible-pull setup.yml completed" \
-  || warn "ansible-pull setup.yml failed or repo not reachable — check /opt/ansible-setup.log"
-
-ANSIBLE_LOG_PATH="/opt/ansible-setup.log" ansible-pull -U "$GITHUB_REPO" -i /etc/ansible/hosts playbooks/servers/server.yml 2>/dev/null \
-  && fixed "ansible-pull server.yml completed" \
-  || warn "ansible-pull server.yml failed — check /opt/ansible-setup.log"
+ok "Ansible ready — run playbooks manually as needed"
 
 # ──────────────────────────────────────────
 # DONE
