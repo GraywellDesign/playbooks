@@ -295,189 +295,302 @@ fi
 # ──────────────────────────────────────────
 # 8. CALCULATE OPTIMAL SETTINGS
 # ──────────────────────────────────────────
-section "8. Calculating Optimal Settings"
+section "8. Calculating Recommended Settings"
 
-# MySQL InnoDB buffer pool — 50-70% of RAM for dedicated DB servers
-# Use 25% for shared WordPress servers to leave room for PHP/Apache
 if [ "$TOTAL_RAM_MB" -le 1024 ]; then
-  OPTIMAL_BUFFER_MB=128
-  OPTIMAL_MAX_CONN=50
-  OPTIMAL_FPM_CHILDREN=5
-  OPTIMAL_FPM_MIN=2
-  OPTIMAL_FPM_MAX_REQ=200
+  OPTIMAL_BUFFER_MB=128;  OPTIMAL_MAX_CONN=50;  OPTIMAL_FPM_CHILDREN=5;  OPTIMAL_FPM_MIN=2; OPTIMAL_FPM_MAX_REQ=200
 elif [ "$TOTAL_RAM_MB" -le 2048 ]; then
-  OPTIMAL_BUFFER_MB=384
-  OPTIMAL_MAX_CONN=100
-  OPTIMAL_FPM_CHILDREN=10
-  OPTIMAL_FPM_MIN=3
-  OPTIMAL_FPM_MAX_REQ=500
+  OPTIMAL_BUFFER_MB=384;  OPTIMAL_MAX_CONN=100; OPTIMAL_FPM_CHILDREN=10; OPTIMAL_FPM_MIN=3; OPTIMAL_FPM_MAX_REQ=500
 elif [ "$TOTAL_RAM_MB" -le 4096 ]; then
-  OPTIMAL_BUFFER_MB=768
-  OPTIMAL_MAX_CONN=150
-  OPTIMAL_FPM_CHILDREN=20
-  OPTIMAL_FPM_MIN=5
-  OPTIMAL_FPM_MAX_REQ=500
+  OPTIMAL_BUFFER_MB=768;  OPTIMAL_MAX_CONN=150; OPTIMAL_FPM_CHILDREN=20; OPTIMAL_FPM_MIN=5; OPTIMAL_FPM_MAX_REQ=500
 else
-  OPTIMAL_BUFFER_MB=2048
-  OPTIMAL_MAX_CONN=200
-  OPTIMAL_FPM_CHILDREN=40
-  OPTIMAL_FPM_MIN=10
-  OPTIMAL_FPM_MAX_REQ=1000
+  OPTIMAL_BUFFER_MB=2048; OPTIMAL_MAX_CONN=200; OPTIMAL_FPM_CHILDREN=40; OPTIMAL_FPM_MIN=10; OPTIMAL_FPM_MAX_REQ=1000
 fi
 
-info "Target settings for ${TOTAL_RAM_MB}MB RAM server:"
-info "  InnoDB buffer pool: ${OPTIMAL_BUFFER_MB}MB"
-info "  MySQL max connections: ${OPTIMAL_MAX_CONN}"
-info "  PHP-FPM max children: ${OPTIMAL_FPM_CHILDREN}"
+OPTIMAL_MRW=$(( TOTAL_RAM_MB / 50 ))
+[ "$OPTIMAL_MRW" -lt 10 ]  && OPTIMAL_MRW=10
+[ "$OPTIMAL_MRW" -gt 150 ] && OPTIMAL_MRW=150
+
+# Gather current values for comparison
+CUR_SWAPPINESS=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
+CUR_SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null || echo "?")
+CUR_FILEMAX=$(sysctl -n fs.file-max 2>/dev/null || echo "?")
+CUR_BUFFER_MB=$(mysql --defaults-file=/root/.my.cnf -e "SHOW VARIABLES LIKE 'innodb_buffer_pool_size';" --skip-column-names 2>/dev/null | awk '{printf "%dMB", $2/1024/1024}' || echo "?")
+CUR_MAX_CONN=$(mysql --defaults-file=/root/.my.cnf -e "SHOW VARIABLES LIKE 'max_connections';" --skip-column-names 2>/dev/null | awk '{print $2}' || echo "?")
+CUR_FPM_CHILDREN=$(grep -E "^pm\.max_children" "$PHP_FPM_POOL" 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' || echo "?")
+CUR_MRW=$(grep -iE "^MaxRequestWorkers|^MaxClients" "$APACHE_CONF" 2>/dev/null | awk '{print $2}' | head -1 || echo "not set")
+CUR_OPCACHE=$(php -r 'echo ini_get("opcache.enable");' 2>/dev/null || echo "?")
+SWAP_TOTAL=$(free -m | grep Swap | awk '{print $2}')
+
+# PHP INI dir for opcache
+PHP_INI_DIR=$(php --ini 2>/dev/null | grep "Scan for" | awk '{print $NF}')
+OPCACHE_INI=""
+[ -n "$PHP_INI_DIR" ] && OPCACHE_INI="$PHP_INI_DIR/99-graywell-opcache.ini"
 
 # ──────────────────────────────────────────
-# 9. AUTO-TUNE: KERNEL / OS
+# 9. SHOW CHANGES SUMMARY & GET APPROVAL
 # ──────────────────────────────────────────
-section "9. Auto-Tune: Kernel & OS"
+section "9. Recommended Changes"
+
+echo ""
+printf "  %-35s %-15s %-15s %s\n" "Setting" "Current" "Recommended" "Impact"
+printf "  %-35s %-15s %-15s %s\n" "-------" "-------" "-----------" "------"
+
+# Build change list
+declare -a CHANGE_KEYS CHANGE_DESCS CHANGE_CURRENTS CHANGE_RECS CHANGE_IMPACTS CHANGE_APPLY
+
+idx=0
+
+# Kernel: swappiness
+if [ "$CUR_SWAPPINESS" != "10" ]; then
+  CHANGE_KEYS[$idx]="kernel_swappiness"
+  CHANGE_DESCS[$idx]="vm.swappiness"
+  CHANGE_CURRENTS[$idx]="$CUR_SWAPPINESS"
+  CHANGE_RECS[$idx]="10"
+  CHANGE_IMPACTS[$idx]="Less swap thrashing, better RAM use"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "vm.swappiness" "$CUR_SWAPPINESS" "10" "Less swap thrashing"
+  idx=$((idx+1))
+fi
+
+# Kernel: somaxconn
+if [ "$CUR_SOMAXCONN" != "65535" ]; then
+  CHANGE_KEYS[$idx]="kernel_somaxconn"
+  CHANGE_DESCS[$idx]="net.core.somaxconn"
+  CHANGE_CURRENTS[$idx]="$CUR_SOMAXCONN"
+  CHANGE_RECS[$idx]="65535"
+  CHANGE_IMPACTS[$idx]="More concurrent connections"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "net.core.somaxconn" "$CUR_SOMAXCONN" "65535" "More concurrent connections"
+  idx=$((idx+1))
+fi
+
+# Kernel: file-max
+if [ "$CUR_FILEMAX" != "500000" ]; then
+  CHANGE_KEYS[$idx]="kernel_filemax"
+  CHANGE_DESCS[$idx]="fs.file-max"
+  CHANGE_CURRENTS[$idx]="$CUR_FILEMAX"
+  CHANGE_RECS[$idx]="500000"
+  CHANGE_IMPACTS[$idx]="More open file handles"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "fs.file-max" "$CUR_FILEMAX" "500000" "More open file handles"
+  idx=$((idx+1))
+fi
+
+# MySQL: buffer pool
+if (command -v mysql &>/dev/null) && [ -n "$MYSQL_CONF" ]; then
+  CHANGE_KEYS[$idx]="mysql_buffer"
+  CHANGE_DESCS[$idx]="innodb_buffer_pool_size"
+  CHANGE_CURRENTS[$idx]="${CUR_BUFFER_MB}"
+  CHANGE_RECS[$idx]="${OPTIMAL_BUFFER_MB}MB"
+  CHANGE_IMPACTS[$idx]="Faster DB queries, less disk I/O"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "innodb_buffer_pool_size" "$CUR_BUFFER_MB" "${OPTIMAL_BUFFER_MB}MB" "Faster DB queries"
+  idx=$((idx+1))
+
+  CHANGE_KEYS[$idx]="mysql_maxconn"
+  CHANGE_DESCS[$idx]="max_connections"
+  CHANGE_CURRENTS[$idx]="${CUR_MAX_CONN}"
+  CHANGE_RECS[$idx]="${OPTIMAL_MAX_CONN}"
+  CHANGE_IMPACTS[$idx]="Right-size connection pool"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "max_connections" "$CUR_MAX_CONN" "$OPTIMAL_MAX_CONN" "Right-size connection pool"
+  idx=$((idx+1))
+fi
+
+# PHP-FPM: max_children
+if [ -n "$PHP_FPM_POOL" ]; then
+  CHANGE_KEYS[$idx]="fpm_children"
+  CHANGE_DESCS[$idx]="pm.max_children"
+  CHANGE_CURRENTS[$idx]="${CUR_FPM_CHILDREN}"
+  CHANGE_RECS[$idx]="${OPTIMAL_FPM_CHILDREN}"
+  CHANGE_IMPACTS[$idx]="Optimal PHP worker count for RAM"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "pm.max_children (PHP-FPM)" "$CUR_FPM_CHILDREN" "$OPTIMAL_FPM_CHILDREN" "Optimal for ${TOTAL_RAM_MB}MB RAM"
+  idx=$((idx+1))
+fi
+
+# PHP OPcache
+if command -v php &>/dev/null && [ -n "$OPCACHE_INI" ] && [ ! -f "$OPCACHE_INI" ]; then
+  CHANGE_KEYS[$idx]="opcache"
+  CHANGE_DESCS[$idx]="OPcache tuning"
+  CHANGE_CURRENTS[$idx]="default"
+  CHANGE_RECS[$idx]="optimized"
+  CHANGE_IMPACTS[$idx]="Faster PHP execution"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "OPcache settings" "default" "optimized" "Faster PHP execution"
+  idx=$((idx+1))
+fi
+
+# Apache MaxRequestWorkers
+if [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CONF" ]; then
+  CHANGE_KEYS[$idx]="apache_mrw"
+  CHANGE_DESCS[$idx]="MaxRequestWorkers"
+  CHANGE_CURRENTS[$idx]="${CUR_MRW}"
+  CHANGE_RECS[$idx]="${OPTIMAL_MRW}"
+  CHANGE_IMPACTS[$idx]="Reduce Apache memory usage"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "Apache MaxRequestWorkers" "$CUR_MRW" "$OPTIMAL_MRW" "Reduce memory usage"
+  idx=$((idx+1))
+fi
+
+# Swap
+if [ "${SWAP_TOTAL:-0}" -eq 0 ] && [ "$TOTAL_RAM_MB" -le 2048 ]; then
+  CHANGE_KEYS[$idx]="swap"
+  CHANGE_DESCS[$idx]="Swap space"
+  CHANGE_CURRENTS[$idx]="none"
+  CHANGE_RECS[$idx]="1GB"
+  CHANGE_IMPACTS[$idx]="Prevent OOM crashes on low RAM"
+  CHANGE_APPLY[$idx]=true
+  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "Swap space" "none" "1GB" "Prevent OOM crashes"
+  idx=$((idx+1))
+fi
+
+TOTAL_CHANGES=$idx
+
+if [ "$TOTAL_CHANGES" -eq 0 ]; then
+  echo ""
+  ok "All settings are already optimal — nothing to change!"
+  echo ""
+  echo -e "Full report saved to: ${BOLD}$REPORT${NC}"
+  report "Completed: $(date)"
+  exit 0
+fi
+
+echo ""
+echo -e "${BOLD}${TOTAL_CHANGES} changes recommended for this ${TOTAL_RAM_MB}MB server.${NC}"
+echo ""
+echo -e "  ${GRN}[A]${NC} Apply all recommended changes"
+echo -e "  ${YEL}[P]${NC} Pick individually"
+echo -e "  ${RED}[S]${NC} Skip all — report only"
+echo ""
+read -rp "  Choice [A/P/S]: " APPROVAL_MODE
+APPROVAL_MODE=$(echo "$APPROVAL_MODE" | tr '[:lower:]' '[:upper:]')
+
+if [ "$APPROVAL_MODE" = "P" ]; then
+  echo ""
+  for i in $(seq 0 $((TOTAL_CHANGES-1))); do
+    printf "  Apply ${YEL}%-30s${NC} %s → %s ? [y/N]: " \
+      "${CHANGE_DESCS[$i]}" "${CHANGE_CURRENTS[$i]}" "${CHANGE_RECS[$i]}"
+    read -r ans
+    [[ "$ans" =~ ^[Yy]$ ]] || CHANGE_APPLY[$i]=false
+  done
+elif [ "$APPROVAL_MODE" = "S" ]; then
+  for i in $(seq 0 $((TOTAL_CHANGES-1))); do
+    CHANGE_APPLY[$i]=false
+  done
+fi
+
+# ──────────────────────────────────────────
+# 10. APPLY APPROVED CHANGES
+# ──────────────────────────────────────────
+section "10. Applying Changes"
 
 SYSCTL_CONF=/etc/sysctl.d/99-graywell-tuning.conf
 SYSCTL_CHANGED=false
+NEED_MYSQL_RESTART=false
+NEED_FPM_RESTART=false
+NEED_APACHE_RESTART=false
 
-apply_sysctl() {
-  local key="$1" value="$2" desc="$3"
-  current=$(sysctl -n "$key" 2>/dev/null || echo "unknown")
-  if [ "$current" = "$value" ]; then
-    ok "$desc already optimal ($key=$value)"
-  else
-    echo "$key = $value" >> "$SYSCTL_CONF"
-    tuned "$desc: $key $current → $value"
-    SYSCTL_CHANGED=true
-  fi
+# Helper to check if a change is approved
+is_approved() {
+  local key="$1"
+  for i in $(seq 0 $((TOTAL_CHANGES-1))); do
+    if [ "${CHANGE_KEYS[$i]}" = "$key" ] && [ "${CHANGE_APPLY[$i]}" = "true" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
-# Start fresh sysctl config
-cat > "$SYSCTL_CONF" <<'EOF'
-# Graywell server tuning
-EOF
+# Kernel settings
+grep -q "# Graywell server tuning" "$SYSCTL_CONF" 2>/dev/null || echo "# Graywell server tuning" > "$SYSCTL_CONF"
 
-apply_sysctl "vm.swappiness"             "10"      "Reduce swap usage (better RAM utilization)"
-apply_sysctl "vm.dirty_ratio"            "15"      "Disk write buffering"
-apply_sysctl "vm.dirty_background_ratio" "5"       "Background disk flush threshold"
-apply_sysctl "net.core.somaxconn"        "65535"   "Max socket connections"
-apply_sysctl "net.ipv4.tcp_max_syn_backlog" "65535" "TCP SYN backlog"
-apply_sysctl "fs.file-max"              "500000"   "Max open file descriptors"
-
-if $SYSCTL_CHANGED; then
-  sysctl -p "$SYSCTL_CONF" &>/dev/null && tuned "Kernel parameters applied" \
-    || warn "Some kernel parameters could not be applied"
-else
-  ok "Kernel parameters already optimal"
+if is_approved "kernel_swappiness"; then
+  sed -i '/vm.swappiness/d' "$SYSCTL_CONF" 2>/dev/null || true
+  echo "vm.swappiness = 10" >> "$SYSCTL_CONF"
+  tuned "vm.swappiness set to 10"
+  SYSCTL_CHANGED=true
 fi
 
-# Increase system file descriptor limits
+if is_approved "kernel_somaxconn"; then
+  sed -i '/net.core.somaxconn/d' "$SYSCTL_CONF" 2>/dev/null || true
+  echo "net.core.somaxconn = 65535" >> "$SYSCTL_CONF"
+  echo "net.ipv4.tcp_max_syn_backlog = 65535" >> "$SYSCTL_CONF"
+  tuned "net.core.somaxconn set to 65535"
+  SYSCTL_CHANGED=true
+fi
+
+if is_approved "kernel_filemax"; then
+  sed -i '/fs.file-max/d' "$SYSCTL_CONF" 2>/dev/null || true
+  echo "fs.file-max = 500000" >> "$SYSCTL_CONF"
+  tuned "fs.file-max set to 500000"
+  SYSCTL_CHANGED=true
+fi
+
+if $SYSCTL_CHANGED; then
+  sysctl -p "$SYSCTL_CONF" &>/dev/null \
+    && tuned "Kernel parameters applied immediately" \
+    || warn "Kernel params saved — will apply on next reboot"
+fi
+
+# File descriptor limits
 LIMITS_CONF=/etc/security/limits.d/99-graywell.conf
-if [ ! -f "$LIMITS_CONF" ]; then
+if [ ! -f "$LIMITS_CONF" ] && $SYSCTL_CHANGED; then
   cat > "$LIMITS_CONF" <<'EOF'
-# Graywell — increase file descriptor limits
 * soft nofile 65535
 * hard nofile 65535
 root soft nofile 65535
 root hard nofile 65535
 EOF
-  tuned "File descriptor limits increased to 65535"
-else
-  ok "File descriptor limits already configured"
+  tuned "File descriptor limits set to 65535"
 fi
 
-# ──────────────────────────────────────────
-# 10. AUTO-TUNE: MYSQL
-# ──────────────────────────────────────────
-section "10. Auto-Tune: MySQL"
-
-if (command -v mysql &>/dev/null || command -v mysqld &>/dev/null) && [ -n "$MYSQL_CONF" ]; then
-  info "MySQL config: $MYSQL_CONF"
-
-  # Check if we've already added our tuning block
+# MySQL
+if is_approved "mysql_buffer" || is_approved "mysql_maxconn"; then
   if grep -q "# Graywell tuning" "$MYSQL_CONF" 2>/dev/null; then
-    # Update existing values
-    sed -i "s/^innodb_buffer_pool_size.*/innodb_buffer_pool_size = ${OPTIMAL_BUFFER_MB}M/" "$MYSQL_CONF"
-    sed -i "s/^max_connections.*/max_connections = ${OPTIMAL_MAX_CONN}/" "$MYSQL_CONF"
-    tuned "MySQL settings updated in existing tuning block"
+    is_approved "mysql_buffer" && sed -i "s/^innodb_buffer_pool_size.*/innodb_buffer_pool_size = ${OPTIMAL_BUFFER_MB}M/" "$MYSQL_CONF"
+    is_approved "mysql_maxconn" && sed -i "s/^max_connections.*/max_connections = ${OPTIMAL_MAX_CONN}/" "$MYSQL_CONF"
+    tuned "MySQL settings updated"
   else
-    # Append tuning block
-    cat >> "$MYSQL_CONF" <<EOF
-
-# Graywell tuning — auto-generated $(date '+%Y-%m-%d')
-[mysqld]
-innodb_buffer_pool_size         = ${OPTIMAL_BUFFER_MB}M
-innodb_log_file_size            = 64M
-innodb_flush_log_at_trx_commit  = 2
-innodb_flush_method             = O_DIRECT
-max_connections                 = ${OPTIMAL_MAX_CONN}
-thread_cache_size               = 8
-table_open_cache                = 400
-tmp_table_size                  = 32M
-max_heap_table_size             = 32M
-slow_query_log                  = 1
-slow_query_log_file             = /var/log/mysql/slow.log
-long_query_time                 = 2
-EOF
-    tuned "MySQL tuning block added (buffer: ${OPTIMAL_BUFFER_MB}MB, max_conn: ${OPTIMAL_MAX_CONN})"
+    {
+      echo ""
+      echo "# Graywell tuning — $(date '+%Y-%m-%d')"
+      echo "[mysqld]"
+      is_approved "mysql_buffer"  && echo "innodb_buffer_pool_size         = ${OPTIMAL_BUFFER_MB}M"
+      is_approved "mysql_maxconn" && echo "max_connections                 = ${OPTIMAL_MAX_CONN}"
+      echo "innodb_log_file_size            = 64M"
+      echo "innodb_flush_log_at_trx_commit  = 2"
+      echo "innodb_flush_method             = O_DIRECT"
+      echo "thread_cache_size               = 8"
+      echo "table_open_cache                = 400"
+      echo "tmp_table_size                  = 32M"
+      echo "max_heap_table_size             = 32M"
+      echo "slow_query_log                  = 1"
+      echo "slow_query_log_file             = /var/log/mysql/slow.log"
+      echo "long_query_time                 = 2"
+    } >> "$MYSQL_CONF"
+    mkdir -p /var/log/mysql; chown mysql:mysql /var/log/mysql 2>/dev/null || true
+    tuned "MySQL tuning block added to $MYSQL_CONF"
   fi
-
-  # Enable slow query log directory
-  mkdir -p /var/log/mysql
-  chown mysql:mysql /var/log/mysql 2>/dev/null || true
-
-  # Flag manual items
-  manual "MySQL query_cache — deprecated in MySQL 8, skip if using MySQL 8+"
-  manual "MySQL max_allowed_packet — increase to 64M if importing large databases"
-  manual "Restart MySQL to apply buffer pool changes: systemctl restart mysql"
-
-elif [ -n "$MYSQL_CONF" ]; then
-  warn "MySQL config found but MySQL not running — skipping MySQL tuning"
-else
-  warn "MySQL config file not found — skipping MySQL tuning"
-  manual "Find your MySQL config with: find /etc /opt -name 'my.cnf' -o -name 'mysqld.cnf' 2>/dev/null"
+  NEED_MYSQL_RESTART=true
 fi
 
-# ──────────────────────────────────────────
-# 11. AUTO-TUNE: PHP-FPM
-# ──────────────────────────────────────────
-section "11. Auto-Tune: PHP-FPM"
-
-if [ -n "$PHP_FPM_POOL" ]; then
-  info "PHP-FPM pool config: $PHP_FPM_POOL"
-
-  # Backup original
+# PHP-FPM
+if is_approved "fpm_children" && [ -n "$PHP_FPM_POOL" ]; then
   cp "$PHP_FPM_POOL" "${PHP_FPM_POOL}.bak.$(date +%Y%m%d)" 2>/dev/null || true
-
-  # Update pm settings
   sed -i "s/^pm\.max_children\s*=.*/pm.max_children = ${OPTIMAL_FPM_CHILDREN}/" "$PHP_FPM_POOL"
   sed -i "s/^pm\.start_servers\s*=.*/pm.start_servers = ${OPTIMAL_FPM_MIN}/" "$PHP_FPM_POOL"
   sed -i "s/^pm\.min_spare_servers\s*=.*/pm.min_spare_servers = ${OPTIMAL_FPM_MIN}/" "$PHP_FPM_POOL"
   sed -i "s/^pm\.max_spare_servers\s*=.*/pm.max_spare_servers = $((OPTIMAL_FPM_CHILDREN / 2))/" "$PHP_FPM_POOL"
   sed -i "s/^pm\.max_requests\s*=.*/pm.max_requests = ${OPTIMAL_FPM_MAX_REQ}/" "$PHP_FPM_POOL"
-
-  # Enable status page if not already (needed for watchdog)
-  if ! grep -q "^pm.status_path" "$PHP_FPM_POOL" 2>/dev/null; then
-    echo "pm.status_path = /fpm-status" >> "$PHP_FPM_POOL"
-    tuned "PHP-FPM status page enabled at /fpm-status"
-  fi
-
-  tuned "PHP-FPM pool tuned (max_children: ${OPTIMAL_FPM_CHILDREN}, max_requests: ${OPTIMAL_FPM_MAX_REQ})"
-  manual "Restart PHP-FPM to apply: systemctl restart php*-fpm"
-
-else
-  warn "PHP-FPM pool config not found — skipping PHP-FPM tuning"
-  manual "Find PHP-FPM pool config: find /etc/php /opt/bitnami -name 'www.conf' 2>/dev/null"
+  grep -q "^pm.status_path" "$PHP_FPM_POOL" || echo "pm.status_path = /fpm-status" >> "$PHP_FPM_POOL"
+  tuned "PHP-FPM pool: max_children=${OPTIMAL_FPM_CHILDREN}, max_requests=${OPTIMAL_FPM_MAX_REQ}"
+  NEED_FPM_RESTART=true
 fi
 
-# ──────────────────────────────────────────
-# 12. AUTO-TUNE: PHP OPCACHE
-# ──────────────────────────────────────────
-section "12. Auto-Tune: PHP OPcache"
-
-PHP_INI_DIR=$(php --ini 2>/dev/null | grep "Scan for" | awk '{print $NF}')
-OPCACHE_INI=""
-[ -n "$PHP_INI_DIR" ] && OPCACHE_INI="$PHP_INI_DIR/99-graywell-opcache.ini"
-
-if command -v php &>/dev/null && [ -n "$OPCACHE_INI" ]; then
+# OPcache
+if is_approved "opcache" && [ -n "$OPCACHE_INI" ]; then
   cat > "$OPCACHE_INI" <<EOF
 ; Graywell OPcache tuning — $(date '+%Y-%m-%d')
 opcache.enable=1
@@ -488,120 +601,133 @@ opcache.revalidate_freq=60
 opcache.save_comments=1
 opcache.enable_cli=0
 EOF
-  tuned "OPcache tuning applied ($OPCACHE_INI)"
-  manual "Restart PHP-FPM to activate OPcache changes: systemctl restart php*-fpm"
-else
-  warn "Could not detect PHP ini directory — skipping OPcache tuning"
-  manual "Manually add OPcache settings to your php.ini"
+  tuned "OPcache settings written to $OPCACHE_INI"
+  NEED_FPM_RESTART=true
 fi
 
-# ──────────────────────────────────────────
-# 13. AUTO-TUNE: APACHE
-# ──────────────────────────────────────────
-section "13. Auto-Tune: Web Server"
+# Apache MaxRequestWorkers
+if is_approved "apache_mrw" && [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CONF" ]; then
+  # Enable modules on bare Ubuntu
+  ! $IS_BITNAMI && a2enmod expires deflate headers >> "$REPORT" 2>&1 || true
 
-if [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CONF" ]; then
-  info "Apache config: $APACHE_CONF"
-
-  # Enable mod_expires and mod_deflate if available (bare Ubuntu only)
-  if ! $IS_BITNAMI; then
-    a2enmod expires deflate headers 2>/dev/null && tuned "Apache modules enabled: expires, deflate, headers" || true
-  fi
-
-  # Check KeepAlive
+  # KeepAlive
   if grep -q "^KeepAlive Off" "$APACHE_CONF" 2>/dev/null; then
     sed -i 's/^KeepAlive Off/KeepAlive On/' "$APACHE_CONF"
-    tuned "KeepAlive enabled"
-  elif grep -q "^KeepAlive On" "$APACHE_CONF" 2>/dev/null; then
-    ok "KeepAlive already enabled"
-  else
+  elif ! grep -q "^KeepAlive" "$APACHE_CONF" 2>/dev/null; then
     echo "KeepAlive On" >> "$APACHE_CONF"
-    tuned "KeepAlive enabled"
   fi
 
-  # MaxRequestWorkers — flag only, too risky to auto-change
-  CURRENT_MRW=$(grep -iE "^MaxRequestWorkers|^MaxClients" "$APACHE_CONF" 2>/dev/null | awk '{print $2}' | head -1)
-  OPTIMAL_MRW=$(( TOTAL_RAM_MB / 50 ))  # rough estimate: ~50MB per worker
-  [ "$OPTIMAL_MRW" -lt 10 ] && OPTIMAL_MRW=10
-  [ "$OPTIMAL_MRW" -gt 150 ] && OPTIMAL_MRW=150
-
-  if [ -n "$CURRENT_MRW" ]; then
-    result "Current MaxRequestWorkers: $CURRENT_MRW (suggested: $OPTIMAL_MRW)"
-    manual "Consider setting MaxRequestWorkers to ~${OPTIMAL_MRW} based on ${TOTAL_RAM_MB}MB RAM"
+  # MaxRequestWorkers — update or add in mpm block
+  if grep -qiE "MaxRequestWorkers|MaxClients" "$APACHE_CONF" 2>/dev/null; then
+    sed -i "s/^\s*MaxRequestWorkers.*/    MaxRequestWorkers      ${OPTIMAL_MRW}/" "$APACHE_CONF"
+    sed -i "s/^\s*MaxClients.*/    MaxClients      ${OPTIMAL_MRW}/" "$APACHE_CONF"
   else
-    manual "MaxRequestWorkers not set — consider adding: MaxRequestWorkers ${OPTIMAL_MRW}"
+    cat >> "$APACHE_CONF" <<EOF
+
+# Graywell tuning — $(date '+%Y-%m-%d')
+<IfModule mpm_prefork_module>
+    StartServers             3
+    MinSpareServers          3
+    MaxSpareServers          8
+    MaxRequestWorkers        ${OPTIMAL_MRW}
+    MaxConnectionsPerChild   500
+</IfModule>
+EOF
   fi
+  tuned "Apache MaxRequestWorkers set to ${OPTIMAL_MRW}"
+  NEED_APACHE_RESTART=true
+fi
 
-  manual "Restart Apache to apply changes: $($IS_BITNAMI && echo '/opt/bitnami/ctlscript.sh restart apache' || echo 'systemctl restart apache2')"
-
-elif [ "$WEB_SERVER" = "nginx" ] && [ -n "$NGINX_CONF" ]; then
-  info "Nginx config: $NGINX_CONF"
-
-  # worker_processes — set to auto if not already
-  if grep -q "worker_processes" "$NGINX_CONF" 2>/dev/null; then
-    sed -i 's/^worker_processes.*/worker_processes auto;/' "$NGINX_CONF"
+# Nginx
+if [ "$WEB_SERVER" = "nginx" ] && [ -n "$NGINX_CONF" ]; then
+  grep -q "worker_processes" "$NGINX_CONF" && \
+    sed -i 's/^worker_processes.*/worker_processes auto;/' "$NGINX_CONF" && \
     tuned "Nginx worker_processes set to auto"
-  fi
-
-  # worker_connections
-  if grep -q "worker_connections" "$NGINX_CONF" 2>/dev/null; then
-    sed -i 's/worker_connections.*/worker_connections 1024;/' "$NGINX_CONF"
+  grep -q "worker_connections" "$NGINX_CONF" && \
+    sed -i 's/worker_connections.*/worker_connections 1024;/' "$NGINX_CONF" && \
     tuned "Nginx worker_connections set to 1024"
-  fi
-
-  manual "Restart Nginx: $($IS_BITNAMI && echo '/opt/bitnami/ctlscript.sh restart nginx' || echo 'systemctl restart nginx')"
-else
-  info "No web server detected — skipping web server tuning"
+  NEED_APACHE_RESTART=true
 fi
 
-# ──────────────────────────────────────────
-# 14. SWAP CHECK
-# ──────────────────────────────────────────
-section "14. Swap"
-
-SWAP_TOTAL=$(free -m | grep Swap | awk '{print $2}')
-if [ "${SWAP_TOTAL:-0}" -eq 0 ]; then
-  warn "No swap configured"
-  if [ "$TOTAL_RAM_MB" -le 2048 ]; then
-    manual "Add swap (recommended for <2GB RAM servers): bash add_swap.sh"
+# Swap
+if is_approved "swap"; then
+  if command -v fallocate &>/dev/null; then
+    fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+    grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+    tuned "1GB swap file created and enabled"
   else
-    info "Swap not critical with ${TOTAL_RAM_MB}MB RAM but still recommended"
+    warn "Could not create swap — run: sudo fallocate -l 1G /swapfile"
   fi
-else
-  ok "Swap configured: ${SWAP_TOTAL}MB"
-  SWAP_USED=$(free -m | grep Swap | awk '{print $3}')
-  result "Swap used: ${SWAP_USED}MB / ${SWAP_TOTAL}MB"
-  [ "${SWAP_USED:-0}" -gt $((SWAP_TOTAL / 2)) ] && \
-    warn "High swap usage — server may be memory-constrained"
 fi
+
+# ──────────────────────────────────────────
+# 11. RESTART SERVICES
+# ──────────────────────────────────────────
+section "11. Restarting Services"
+
+restart_service() {
+  local name="$1" cmd="$2"
+  eval "$cmd" >> "$REPORT" 2>&1 \
+    && ok "$name restarted" \
+    || warn "$name restart failed — restart manually"
+}
+
+if $NEED_MYSQL_RESTART; then
+  if $IS_BITNAMI; then
+    restart_service "MariaDB" "/opt/bitnami/ctlscript.sh restart mariadb"
+  else
+    restart_service "MySQL" "systemctl restart mysql || systemctl restart mariadb"
+  fi
+fi
+
+if $NEED_FPM_RESTART; then
+  PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)
+  if $IS_BITNAMI; then
+    restart_service "PHP-FPM" "/opt/bitnami/ctlscript.sh restart php-fpm"
+  else
+    restart_service "PHP-FPM" "systemctl restart php${PHP_VER}-fpm 2>/dev/null || systemctl restart php-fpm"
+  fi
+fi
+
+if $NEED_APACHE_RESTART; then
+  if $IS_BITNAMI; then
+    restart_service "Apache" "/opt/bitnami/ctlscript.sh restart apache"
+  elif [ "$WEB_SERVER" = "nginx" ]; then
+    restart_service "Nginx" "systemctl restart nginx"
+  else
+    restart_service "Apache" "systemctl restart apache2"
+  fi
+fi
+
+# ──────────────────────────────────────────
+# 12. SWAP CHECK
+# ──────────────────────────────────────────
+SWAP_TOTAL=$(free -m | grep Swap | awk '{print $2}')
+[ "${SWAP_TOTAL:-0}" -gt 0 ] \
+  && ok "Swap: ${SWAP_TOTAL}MB configured" \
+  || warn "No swap — consider adding for stability"
 
 # ──────────────────────────────────────────
 # SUMMARY
 # ──────────────────────────────────────────
 section "Summary"
 
-TUNED_COUNT=$(grep -c "\[TUNED\]" "$REPORT" 2>/dev/null || echo 0)
-MANUAL_COUNT=$(grep -c "\[MANUAL REVIEW\]" "$REPORT" 2>/dev/null || echo 0)
-WARN_COUNT=$(grep -c "\[WARN\]" "$REPORT" 2>/dev/null || echo 0)
+APPLIED=0
+SKIPPED=0
+for i in $(seq 0 $((TOTAL_CHANGES-1))); do
+  [ "${CHANGE_APPLY[$i]}" = "true" ] && APPLIED=$((APPLIED+1)) || SKIPPED=$((SKIPPED+1))
+done
 
-echo -e "\n  ${GRN}Settings auto-tuned:${NC}      $TUNED_COUNT"
-echo -e "  ${YEL}Manual review needed:${NC}     $MANUAL_COUNT"
-echo -e "  ${YEL}Warnings:${NC}                 $WARN_COUNT"
-
+echo -e "\n  ${GRN}Changes applied:${NC}   $APPLIED"
+echo -e "  ${YEL}Changes skipped:${NC}   $SKIPPED"
 echo ""
-echo -e "${BOLD}Restart these services to apply all changes:${NC}"
-command -v mysql &>/dev/null    && echo "  sudo systemctl restart mysql"
-[ -n "$PHP_FPM_POOL" ]          && echo "  sudo systemctl restart php*-fpm"
-[ "$WEB_SERVER" = "apache" ]    && { $IS_BITNAMI \
-  && echo "  sudo /opt/bitnami/ctlscript.sh restart apache" \
-  || echo "  sudo systemctl restart apache2"; }
-[ "$WEB_SERVER" = "nginx" ]     && echo "  sudo systemctl restart nginx"
 
-echo ""
-echo -e "${BOLD}Manual review items:${NC}"
-grep "\[MANUAL REVIEW\]" "$REPORT" | sed 's/\[MANUAL REVIEW\] /  - /'
+if [ "$APPLIED" -gt 0 ]; then
+  echo -e "${BOLD}Applied:${NC}"
+  grep "\[TUNED\]" "$REPORT" | tail -"$APPLIED" | sed 's/.*\[TUNED\] /  ✓ /'
+  echo ""
+fi
 
-echo ""
 echo -e "Full report saved to: ${BOLD}$REPORT${NC}"
 report ""
 report "Completed: $(date)"
