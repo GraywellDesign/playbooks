@@ -41,7 +41,7 @@ echo -e "Host: $(hostname) | $(date)\n"
 
 # ── Detect environment ───────────────────────────────────────
 IS_BITNAMI=false
-[ -d /opt/bitnami ] && IS_BITNAMI=true
+{ [ -d /opt/bitnami ] || [ -d /bitnami ]; } && IS_BITNAMI=true
 
 # RAM detection (in MB)
 TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
@@ -60,10 +60,17 @@ report "RAM: ${TOTAL_RAM_MB}MB | CPU: ${CPU_CORES} cores | Available: ${AVAIL_RA
 WEB_SERVER="none"
 APACHE_CONF=""
 NGINX_CONF=""
-for path in /opt/bitnami/apache/conf/httpd.conf /etc/apache2/apache2.conf; do
+for path in \
+  /bitnami/apache2/conf/httpd.conf \
+  /opt/bitnami/apache/conf/httpd.conf \
+  /etc/apache2/apache2.conf \
+  /etc/httpd/conf/httpd.conf; do
   [ -f "$path" ] && { APACHE_CONF="$path"; WEB_SERVER="apache"; break; }
 done
-for path in /opt/bitnami/nginx/conf/nginx.conf /etc/nginx/nginx.conf; do
+for path in \
+  /bitnami/nginx/conf/nginx.conf \
+  /opt/bitnami/nginx/conf/nginx.conf \
+  /etc/nginx/nginx.conf; do
   [ -f "$path" ] && { NGINX_CONF="$path"; WEB_SERVER="nginx"; break; }
 done
 [ -n "$APACHE_CONF" ] && [ -n "$NGINX_CONF" ] && WEB_SERVER="apache"
@@ -71,8 +78,8 @@ done
 # ── Detect PHP-FPM config ────────────────────────────────────
 PHP_FPM_POOL=""
 for path in \
+  /bitnami/php/etc/php-fpm.d/www.conf \
   /opt/bitnami/php/etc/php-fpm.d/www.conf \
-  /etc/php/*/fpm/pool.d/www.conf \
   /etc/php-fpm.d/www.conf; do
   [ -f "$path" ] && { PHP_FPM_POOL="$path"; break; }
 done
@@ -84,6 +91,7 @@ fi
 # ── Detect MySQL config ──────────────────────────────────────
 MYSQL_CONF=""
 for path in \
+  /bitnami/mariadb/conf/my.cnf \
   /opt/bitnami/mariadb/conf/my.cnf \
   /etc/mysql/mysql.conf.d/mysqld.cnf \
   /etc/mysql/mariadb.conf.d/50-server.cnf \

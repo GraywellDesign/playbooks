@@ -192,10 +192,24 @@ SHADOW_PERMS=$(stat -c "%a %U %G" /etc/shadow 2>/dev/null)
 # ──────────────────────────────────────────
 section "8. WORDPRESS SECURITY"
 # ──────────────────────────────────────────
-WP_PATHS=$(find /var/www /srv /home -name "wp-config.php" 2>/dev/null)
+# Search all known WordPress install locations:
+# - Lightsail Bitnami:    /bitnami/wordpress/
+# - Standard Bitnami:     /opt/bitnami/wordpress/
+# - Bare Ubuntu:          /var/www/html/ or /var/www/*/
+# - Multi-site/cPanel:    /home/*/public_html/
+# - Generic fallback:     /srv/
+WP_PATHS=$(find \
+  /bitnami \
+  /opt/bitnami \
+  /var/www \
+  /srv \
+  /home \
+  -name "wp-config.php" \
+  -not -path "*/wp-config-sample.php" \
+  2>/dev/null)
 
 if [ -z "$WP_PATHS" ]; then
-  warn "No wp-config.php found under /var/www, /srv, /home"
+  warn "No wp-config.php found — checked /bitnami, /opt/bitnami, /var/www, /srv, /home"
 else
   for WP_CONFIG in $WP_PATHS; do
     WP_DIR=$(dirname "$WP_CONFIG")

@@ -58,7 +58,7 @@ section "Detecting Environment"
 # Bitnami or bare?
 IS_BITNAMI=false
 BITNAMI_WP_DIR=""
-if [ -d "/opt/bitnami" ]; then
+if [ -d "/opt/bitnami" ] || [ -d "/bitnami" ]; then
   IS_BITNAMI=true
   BITNAMI_WP_DIR=$(find /opt/bitnami -name "wp-config.php" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
   info "Bitnami stack detected"
@@ -88,13 +88,20 @@ WEB_SERVER="none"
 APACHE_CONF=""
 NGINX_CONF=""
 
-# Check Apache
-for path in /opt/bitnami/apache/conf/httpd.conf /etc/apache2/apache2.conf /etc/httpd/conf/httpd.conf; do
+# Check Apache — Lightsail Bitnami, standard Bitnami, bare Ubuntu
+for path in \
+  /bitnami/apache2/conf/httpd.conf \
+  /opt/bitnami/apache/conf/httpd.conf \
+  /etc/apache2/apache2.conf \
+  /etc/httpd/conf/httpd.conf; do
   [ -f "$path" ] && { APACHE_CONF="$path"; WEB_SERVER="apache"; break; }
 done
 
-# Check Nginx (may coexist or replace Apache)
-for path in /opt/bitnami/nginx/conf/nginx.conf /etc/nginx/nginx.conf; do
+# Check Nginx — Lightsail Bitnami, standard Bitnami, bare Ubuntu
+for path in \
+  /bitnami/nginx/conf/nginx.conf \
+  /opt/bitnami/nginx/conf/nginx.conf \
+  /etc/nginx/nginx.conf; do
   [ -f "$path" ] && { NGINX_CONF="$path"; WEB_SERVER="nginx"; break; }
 done
 
@@ -466,8 +473,16 @@ fi
 # ──────────────────────────────────────────
 section "8. WordPress Hardening"
 
-# Find all wp-config.php files
-WP_CONFIGS=$(find /var/www /srv /home /opt/bitnami -name "wp-config.php" 2>/dev/null || true)
+# Find all wp-config.php files — covers Lightsail Bitnami, standard Bitnami, bare Ubuntu, cPanel
+WP_CONFIGS=$(find \
+  /bitnami \
+  /opt/bitnami \
+  /var/www \
+  /srv \
+  /home \
+  -name "wp-config.php" \
+  -not -path "*/wp-config-sample.php" \
+  2>/dev/null || true)
 
 if [ -z "$WP_CONFIGS" ]; then
   info "No WordPress installs found — skipping"
@@ -814,6 +829,7 @@ After=network.target mysql.service mariadb.service apache2.service nginx.service
 [Service]
 Type=oneshot
 ExecStart=/opt/scripts/watchdog.sh
+Environment=HOME=/root
 StandardOutput=null
 StandardError=append:/var/log/graywell-watchdog.log
 EOF

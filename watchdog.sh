@@ -61,7 +61,7 @@ should_alert() {
 
 # ── Service restart ──────────────────────────────────────────
 IS_BITNAMI=false
-[ -d /opt/bitnami ] && IS_BITNAMI=true
+{ [ -d /opt/bitnami ] || [ -d /bitnami ]; } && IS_BITNAMI=true
 
 # MySQL credentials — explicit path so systemd finds it regardless of HOME
 MYSQL_OPTS="--defaults-file=/root/.my.cnf --connect-timeout=5"
