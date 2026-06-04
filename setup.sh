@@ -863,24 +863,28 @@ echo -e "\n${BOLD}Summary log: $LOG${NC}"
 echo -e "Ansible log: /opt/ansible-setup.log\n"
 
 # Only count and show entries from this run (lines added after RUN_START_LINE)
-FIXED_COUNT=$(tail -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FIXED\]" 2>/dev/null || true); FIXED_COUNT=${FIXED_COUNT:-0}
-WARN_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[WARN\]"  2>/dev/null || true); WARN_COUNT=${WARN_COUNT:-0}
-FAIL_COUNT=$(tail  -n "+$RUN_START_LINE" "$LOG" 2>/dev/null | grep -c "\[FAIL\]"  2>/dev/null || true); FAIL_COUNT=${FAIL_COUNT:-0}
+RUN_LOG=$(tail -n "+${RUN_START_LINE}" "$LOG" 2>/dev/null || true)
+FIXED_COUNT=$(echo "$RUN_LOG" | grep -c "\[FIXED\]" 2>/dev/null || echo 0)
+WARN_COUNT=$(echo "$RUN_LOG"  | grep -c "\[WARN\]"  2>/dev/null || echo 0)
+FAIL_COUNT=$(echo "$RUN_LOG"  | grep -c "\[FAIL\]"  2>/dev/null || echo 0)
+FIXED_COUNT=$(echo "$FIXED_COUNT" | tr -d '[:space:]')
+WARN_COUNT=$(echo "$WARN_COUNT"   | tr -d '[:space:]')
+FAIL_COUNT=$(echo "$FAIL_COUNT"   | tr -d '[:space:]')
 
 echo -e "  ${GRN}Fixed:${NC}    $FIXED_COUNT items"
 echo -e "  ${YEL}Warnings:${NC} $WARN_COUNT items"
 echo -e "  ${RED}Failures:${NC} $FAIL_COUNT items"
 echo ""
 
-if [ "$FAIL_COUNT" -gt 0 ]; then
+if [ "${FAIL_COUNT}" -gt 0 ] 2>/dev/null; then
   echo -e "${RED}Items needing manual attention:${NC}"
-  tail -n "+$RUN_START_LINE" "$LOG" | grep "\[FAIL\]" | sed 's/^/  /'
+  echo "$RUN_LOG" | grep "\[FAIL\]" | sed 's/^/  /'
   echo ""
 fi
 
-if [ "$WARN_COUNT" -gt 0 ]; then
+if [ "${WARN_COUNT}" -gt 0 ] 2>/dev/null; then
   echo -e "${YEL}Warnings to review:${NC}"
-  tail -n "+$RUN_START_LINE" "$LOG" | grep "\[WARN\]" | sed 's/^/  /'
+  echo "$RUN_LOG" | grep "\[WARN\]" | sed 's/^/  /'
   echo ""
 fi
 
