@@ -51,8 +51,9 @@ done
 SHELL_USERS=$(awk -F: '($7 !~ /nologin|false|sync/) && ($3 >= 1000) {print $1}' /etc/passwd)
 info "Human shell accounts: $(echo "$SHELL_USERS" | tr '\n' ' ')"
 
-EMPTY_PASS=$(awk -F: '($2 == "" || $2 == "!!" || $2 == "*") && ($3 >= 500) {print $1}' /etc/shadow 2>/dev/null)
-[ -n "$EMPTY_PASS" ] && bad "Accounts with empty/locked passwords: $EMPTY_PASS" || ok "No accounts with blank passwords"
+# Only flag real user accounts (UID >= 1000) with empty passwords — system accounts are locked by design
+EMPTY_PASS=$(awk -F: '($2 == "") && ($3 >= 1000) {print $1}' /etc/shadow 2>/dev/null)
+[ -n "$EMPTY_PASS" ] && bad "User accounts with empty passwords: $EMPTY_PASS" || ok "No user accounts with blank passwords"
 
 SUDO_USERS=$(grep -Po '^[^#\s]+(?=.*ALL)' /etc/sudoers 2>/dev/null; grep -r 'ALL' /etc/sudoers.d/ 2>/dev/null | grep -v '^#' | awk -F: '{print $1}')
 info "Sudo/wheel members:"
@@ -80,12 +81,39 @@ check_ssh() {
 
 [ -f "$SSHD" ] || { bad "sshd_config not found"; }
 
-check_ssh "PermitRootLogin"        "no"       "Root login disabled"
-check_ssh "PasswordAuthentication" "no"       "Password auth disabled (keys only)"
+# PermitRootLogin — accept both "no" and "prohibit-password" (key-only root is acceptable)
+ROOT_LOGIN=$(grep -iE "^PermitRootLogin\s" "$SSHD" 2>/dev/null | awk '{print $2}')
+ROOT_LOGIN=${ROOT_LOGIN:-"(not set/default)"}
+if [[ "$ROOT_LOGIN" == "no" || "$ROOT_LOGIN" == "prohibit-password" ]]; then
+  ok "Root login secured: $ROOT_LOGIN"
+else
+  bad "Root login: $ROOT_LOGIN (should be 'no' or 'prohibit-password')"
+fi
+
+# PasswordAuthentication — check effective value (Ubuntu 22.04+ defaults to no)
+PASS_AUTH=$(grep -iE "^PasswordAuthentication\s" "$SSHD" 2>/dev/null | awk '{print $2}')
+if [ -z "$PASS_AUTH" ]; then
+  # Not set explicitly — check sshd_config.d includes and Ubuntu version
+  UBUNTU_VER=$(lsb_release -rs 2>/dev/null | cut -d. -f1)
+  if [ "${UBUNTU_VER:-0}" -ge 22 ]; then
+    ok "Password auth disabled (Ubuntu 22+ default is no)"
+  else
+    warn "PasswordAuthentication not set — verify default is 'no' for your OS version"
+  fi
+elif [ "$PASS_AUTH" = "no" ]; then
+  ok "Password auth disabled (keys only): no"
+else
+  bad "Password auth enabled: $PASS_AUTH (should be no)"
+fi
+
 check_ssh "PermitEmptyPasswords"   "no"       "Empty passwords forbidden"
 check_ssh "X11Forwarding"          "no"       "X11 forwarding disabled"
 check_ssh "UsePAM"                 "yes"      "PAM enabled"
-check_ssh "Protocol"               "2"        "SSH protocol version"
+# Protocol directive removed in modern OpenSSH — SSH2 is always used now
+SSH_VER=$(ssh -V 2>&1 | grep -oP 'OpenSSH_\K[\d.]+' | head -1)
+if [ -n "$SSH_VER" ]; then
+  ok "SSH version: OpenSSH $SSH_VER (SSH2 only — Protocol directive no longer needed)"
+fi
 
 PORT=$(grep -iE "^Port\s" "$SSHD" | awk '{print $2}')
 PORT=${PORT:-22}
@@ -291,9 +319,10 @@ info "Failed login attempts (last 20):"
 grep "Failed password\|Invalid user" /var/log/auth.log 2>/dev/null | tail -20 | sed 's/^/    /' \
   || grep "Failed password\|Invalid user" /var/log/secure 2>/dev/null | tail -20 | sed 's/^/    /'
 
-FAIL_COUNT=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null \
-  || grep -c "Failed password" /var/log/secure 2>/dev/null || echo 0)
-[ "$FAIL_COUNT" -gt 100 ] && bad "High failed login count: $FAIL_COUNT — ensure fail2ban is active" \
+FAIL_COUNT=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo 0)
+[ "$FAIL_COUNT" -eq 0 ] && FAIL_COUNT=$(grep -c "Failed password" /var/log/secure 2>/dev/null || echo 0)
+FAIL_COUNT=$(echo "$FAIL_COUNT" | tr -d '[:space:]')
+[ "${FAIL_COUNT:-0}" -gt 100 ] && bad "High failed login count: $FAIL_COUNT — ensure fail2ban is active" \
   || info "Failed login count in log: $FAIL_COUNT"
 
 info "Currently logged-in users:"
@@ -320,10 +349,14 @@ section "13. MYSQL / DATABASE"
 # ──────────────────────────────────────────
 if command -v mysql &>/dev/null; then
   info "MySQL/MariaDB is installed"
-  # Check if root has no password (anonymous access)
-  mysql -u root --connect-timeout=3 -e "SELECT 1" 2>/dev/null \
-    && bad "MySQL root accessible without password!" \
-    || ok "MySQL root requires authentication (or socket auth)"
+  # Check root auth — try without password first (bad), then with .my.cnf (good)
+  if mysql -u root --connect-timeout=3 --password="" -e "SELECT 1" 2>/dev/null | grep -q 1; then
+    bad "MySQL root accessible without password!"
+  elif mysql --defaults-file=/root/.my.cnf --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
+    ok "MySQL root requires authentication (password set)"
+  else
+    ok "MySQL root requires authentication (or socket auth)"
+  fi
 
   # Check if MySQL binds to 0.0.0.0
   MY_BIND=$(grep -E "^bind-address" /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/my.cnf /etc/my.cnf 2>/dev/null | head -1)
