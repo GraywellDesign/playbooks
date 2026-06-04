@@ -103,31 +103,30 @@ check_mysql() {
 
   # Check process exists
   if ! pgrep -x mysqld &>/dev/null && ! pgrep -x mariadbd &>/dev/null; then
-    log "[FAIL] MySQL/MariaDB process not found"
+    local current_state
+    current_state=$(get_state "mysql")
+    log "[FAIL] MySQL/MariaDB process not found (current state: $current_state)"
 
-    if should_alert "mysql" "warning"; then
-      set_state "mysql" "warning"
-      if restart_service "$service_name" "MySQL/MariaDB"; then
-        log "[RECOVER] MySQL restarted successfully"
-        send_alert "MySQL restarted automatically" \
-          "MySQL/MariaDB was down and has been automatically restarted.\n\nStatus: RECOVERED\nAction taken: systemctl restart $service_name"
-        set_state "mysql" "ok"
-      else
-        log "[CRITICAL] MySQL failed to restart"
-        set_state "mysql" "critical"
-        send_alert "MySQL DOWN — restart failed" \
-          "MySQL/MariaDB is DOWN and could not be automatically restarted.\n\nStatus: CRITICAL — manual intervention required\nAction taken: restart attempted, failed\n\nCheck: sudo systemctl status $service_name\nCheck: sudo journalctl -u $service_name -n 50" \
-          "critical"
-      fi
-    elif [ "$(get_state mysql)" = "critical" ]; then
-      # Still down after previous critical alert — resend every 10 cycles
+    # Always attempt restart when down, regardless of current state
+    set_state "mysql" "warning"
+    if restart_service "$service_name" "MySQL/MariaDB"; then
+      log "[RECOVER] MySQL restarted successfully"
+      send_alert "MySQL restarted automatically" \
+        "MySQL/MariaDB was down and has been automatically restarted.\n\nStatus: RECOVERED\nAction taken: systemctl restart $service_name"
+      set_state "mysql" "ok"
+      rm -f "$STATE_DIR/mysql_crit_count"
+    else
+      log "[CRITICAL] MySQL failed to restart"
+      set_state "mysql" "critical"
+      # Track how many consecutive failures
       local count
       count=$(cat "$STATE_DIR/mysql_crit_count" 2>/dev/null || echo 0)
       count=$((count + 1))
       echo "$count" > "$STATE_DIR/mysql_crit_count"
-      if [ $((count % 10)) -eq 0 ]; then
-        send_alert "MySQL STILL DOWN — ${count} minutes" \
-          "MySQL/MariaDB has been down for approximately ${count} minutes.\nManual intervention required." \
+      # Alert on first failure, then every 10 cycles
+      if [ "$count" -eq 1 ] || [ $((count % 10)) -eq 0 ]; then
+        send_alert "MySQL DOWN — restart failed (attempt $count)" \
+          "MySQL/MariaDB is DOWN and could not be automatically restarted.\n\nAttempts: $count\nStatus: CRITICAL — manual intervention required\n\nCheck: sudo systemctl status $service_name\nCheck: sudo journalctl -u $service_name -n 50" \
           "critical"
       fi
     fi
