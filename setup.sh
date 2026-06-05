@@ -32,23 +32,53 @@ RUN_START_LINE=$(wc -l < "$LOG" 2>/dev/null || echo 0)
 log "=== Setup started on $(hostname) at $(date) ==="
 
 # ──────────────────────────────────────────
-# CREDENTIALS (prompted once at start)
+# BULK INPUT MODE
 # ──────────────────────────────────────────
-echo -e "${BOLD}A few credentials are needed before setup begins.${NC}\n"
+# Usage: sudo bash server_setup.sh <<< "brevo_user;brevo_pass;mysql_root_pass"
+# Example: sudo bash server_setup.sh <<< "alerts@example.com;smtp_key_xyz123;mypassword123"
+# Or leave empty to use interactive prompts:
+#          sudo bash server_setup.sh <<< ";;;"
 
-echo -e "${BOLD}Brevo SMTP${NC} (for SSH login + watchdog alerts)"
-echo -e "Get these from: Brevo → Transactional → SMTP & API → SMTP tab\n"
-read -rp  "  Brevo SMTP username (usually your email): " BREVO_USER
-read -rsp "  Brevo SMTP password (your SMTP key):      " BREVO_PASS
-echo ""
-ALERT_EMAIL="security@graywelldesign.com"
+BULK_INPUT=$(head -n1 2>/dev/null)
+BULK_MODE=false
 
-echo ""
-echo -e "${BOLD}MySQL Root Password${NC}"
-echo -e "This will be set as the MySQL root password and stored in /root/.my.cnf\n"
-read -rsp "  MySQL root password (leave blank to skip): " MYSQL_ROOT_PASS
-echo ""
-echo ""
+if [ -n "$BULK_INPUT" ] && [ "$BULK_INPUT" != ";;" ]; then
+  # Parse bulk input (semicolon-delimited)
+  IFS=';' read -r BREVO_USER BREVO_PASS MYSQL_ROOT_PASS <<< "$BULK_INPUT"
+
+  # Trim whitespace
+  BREVO_USER=$(echo "$BREVO_USER" | xargs)
+  BREVO_PASS=$(echo "$BREVO_PASS" | xargs)
+  MYSQL_ROOT_PASS=$(echo "$MYSQL_ROOT_PASS" | xargs)
+
+  BULK_MODE=true
+  info "Bulk input detected"
+  info "Brevo SMTP user: ${BREVO_USER:-(not provided)}"
+  info "MySQL root password: ${MYSQL_ROOT_PASS:-(not provided)}"
+  echo ""
+else
+  # ──────────────────────────────────────────
+  # INTERACTIVE CREDENTIALS (prompted once at start)
+  # ──────────────────────────────────────────
+  echo -e "${BOLD}A few credentials are needed before setup begins.${NC}\n"
+
+  echo -e "${BOLD}Brevo SMTP${NC} (for SSH login + watchdog alerts)"
+  echo -e "Get these from: Brevo → Transactional → SMTP & API → SMTP tab\n"
+  read -rp  "  Brevo SMTP username (usually your email): " BREVO_USER
+  read -rsp "  Brevo SMTP password (your SMTP key):      " BREVO_PASS
+  echo ""
+  ALERT_EMAIL="security@graywelldesign.com"
+
+  echo ""
+  echo -e "${BOLD}MySQL Root Password${NC}"
+  echo -e "This will be set as the MySQL root password and stored in /root/.my.cnf\n"
+  read -rsp "  MySQL root password (leave blank to skip): " MYSQL_ROOT_PASS
+  echo ""
+  echo ""
+fi
+
+# Set default alert email if not in bulk mode
+ALERT_EMAIL="${ALERT_EMAIL:-security@graywelldesign.com}"
 
 # ──────────────────────────────────────────
 # DETECT ENVIRONMENT
@@ -966,3 +996,19 @@ fi
 
 echo -e "Completed: $(date)"
 log "=== Setup completed on $(hostname) at $(date) ==="
+
+# ── SSH Access Safety Reminder ───────────────────────────────
+ALLOW_LINE=$(grep -iE "^AllowUsers\s" /etc/ssh/sshd_config 2>/dev/null || echo "")
+SERVER_IP=$(hostname -I | awk '{print $1}')
+echo ""
+echo -e "${BOLD}${YEL}⚠  IMPORTANT — Verify SSH access before closing this session:${NC}"
+echo ""
+echo -e "  AllowUsers: ${BOLD}$(echo "$ALLOW_LINE" | sed 's/AllowUsers //')${NC}"
+echo ""
+echo "  Open a NEW terminal and test each user before closing this window:"
+echo -e "  ${BOLD}ssh esalas@${SERVER_IP}${NC}"
+[ -n "$(id ubuntu 2>/dev/null)" ]  && echo -e "  ${BOLD}ssh ubuntu@${SERVER_IP}${NC}"
+[ -n "$(id bitnami 2>/dev/null)" ] && echo -e "  ${BOLD}ssh bitnami@${SERVER_IP}${NC}"
+echo ""
+echo -e "  If locked out: use your cloud provider's browser console to fix."
+echo ""
