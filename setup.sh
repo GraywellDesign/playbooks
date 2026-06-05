@@ -512,7 +512,12 @@ if [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CONF" ]; then
     fixed "ServerSignature set to Off"
   fi
 
-  restart_webserver "apache"
+  # Validate config before restart
+  if apache2ctl configtest 2>&1 | grep -q "Syntax OK"; then
+    restart_webserver "apache"
+  else
+    warn "Apache config has syntax errors — fix manually: sudo apache2ctl configtest"
+  fi
 
 elif [ "$WEB_SERVER" = "nginx" ] && [ -n "$NGINX_CONF" ]; then
   # Nginx: server_tokens off (hides version number)
@@ -848,13 +853,25 @@ else
   info "Installing Ansible..."
   UBUNTU_MAJOR=$(lsb_release -rs 2>/dev/null | cut -d. -f1)
   if [ "${UBUNTU_MAJOR:-0}" -ge 24 ]; then
-    apt-get install -y -qq ansible \
+    # Ubuntu 24.04+ — try apt first, fall back to pip
+    apt-get install -y -qq ansible 2>/dev/null \
       && fixed "Ansible installed via apt" \
-      || warn "Ansible install failed — try manually: apt install ansible"
+      || {
+        info "apt install failed — trying pip3 with --break-system-packages..."
+        pip3 install ansible --quiet --break-system-packages 2>/dev/null \
+          && fixed "Ansible installed via pip3 (--break-system-packages)" \
+          || warn "Ansible install failed — try manually: pip3 install ansible --break-system-packages"
+      }
   else
-    pip3 install ansible --quiet \
-      && fixed "Ansible installed via pip3" \
-      || warn "Ansible install failed — try manually: pip3 install ansible"
+    # Ubuntu 22.04 and older — use apt (no externally-managed restriction)
+    apt-get install -y -qq ansible 2>/dev/null \
+      && fixed "Ansible installed via apt" \
+      || {
+        info "apt install failed — trying pip3..."
+        pip3 install ansible --quiet 2>/dev/null \
+          && fixed "Ansible installed via pip3" \
+          || warn "Ansible install failed — try manually: pip3 install ansible"
+      }
   fi
 fi
 
