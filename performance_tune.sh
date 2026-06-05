@@ -548,11 +548,27 @@ fi
 
 # MySQL
 if is_approved "mysql_buffer" || is_approved "mysql_maxconn"; then
-  if grep -q "# Graywell tuning" "$MYSQL_CONF" 2>/dev/null; then
-    is_approved "mysql_buffer" && sed -i "s/^innodb_buffer_pool_size.*/innodb_buffer_pool_size = ${OPTIMAL_BUFFER_MB}M/" "$MYSQL_CONF"
-    is_approved "mysql_maxconn" && sed -i "s/^max_connections.*/max_connections = ${OPTIMAL_MAX_CONN}/" "$MYSQL_CONF"
-    tuned "MySQL settings updated"
-  else
+  # Always try to update existing values first (case-insensitive, with or without spaces)
+  MYSQL_UPDATED=false
+
+  if is_approved "mysql_buffer"; then
+    # Try to update existing setting (case-insensitive, handle various spacing)
+    if grep -iq "innodb_buffer_pool_size" "$MYSQL_CONF" 2>/dev/null; then
+      sed -i "s/^\s*innodb_buffer_pool_size\s*=.*/innodb_buffer_pool_size         = ${OPTIMAL_BUFFER_MB}M/" "$MYSQL_CONF"
+      MYSQL_UPDATED=true
+    fi
+  fi
+
+  if is_approved "mysql_maxconn"; then
+    # Try to update existing setting (case-insensitive, handle various spacing)
+    if grep -iq "max_connections" "$MYSQL_CONF" 2>/dev/null; then
+      sed -i "s/^\s*max_connections\s*=.*/max_connections                 = ${OPTIMAL_MAX_CONN}/" "$MYSQL_CONF"
+      MYSQL_UPDATED=true
+    fi
+  fi
+
+  # If no existing Graywell section found, append one
+  if ! grep -q "# Graywell" "$MYSQL_CONF" 2>/dev/null; then
     {
       echo ""
       echo "# Graywell tuning — $(date '+%Y-%m-%d')"
@@ -572,6 +588,15 @@ if is_approved "mysql_buffer" || is_approved "mysql_maxconn"; then
     } >> "$MYSQL_CONF"
     mkdir -p /var/log/mysql; chown mysql:mysql /var/log/mysql 2>/dev/null || true
     tuned "MySQL tuning block added to $MYSQL_CONF"
+  else
+    # Graywell section already exists — make sure all settings are there
+    if is_approved "mysql_buffer" && ! grep -q "innodb_buffer_pool_size" "$MYSQL_CONF"; then
+      sed -i "/# Graywell tuning/a innodb_buffer_pool_size         = ${OPTIMAL_BUFFER_MB}M" "$MYSQL_CONF"
+    fi
+    if is_approved "mysql_maxconn" && ! grep -q "max_connections" "$MYSQL_CONF"; then
+      sed -i "/# Graywell tuning/a max_connections                 = ${OPTIMAL_MAX_CONN}" "$MYSQL_CONF"
+    fi
+    $MYSQL_UPDATED && tuned "MySQL settings updated in $MYSQL_CONF" || tuned "MySQL tuning section verified"
   fi
   NEED_MYSQL_RESTART=true
 fi
@@ -617,11 +642,19 @@ if is_approved "apache_mrw" && [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CON
     echo "KeepAlive On" >> "$APACHE_CONF"
   fi
 
-  # MaxRequestWorkers — update or add in mpm block
+  # MaxRequestWorkers — try to update existing value first (handles spacing variations)
+  MRW_UPDATED=false
   if grep -qiE "MaxRequestWorkers|MaxClients" "$APACHE_CONF" 2>/dev/null; then
-    sed -i "s/^\s*MaxRequestWorkers.*/    MaxRequestWorkers      ${OPTIMAL_MRW}/" "$APACHE_CONF"
-    sed -i "s/^\s*MaxClients.*/    MaxClients      ${OPTIMAL_MRW}/" "$APACHE_CONF"
-  else
+    # Update MaxRequestWorkers (case-insensitive, flexible spacing)
+    sed -i "s/\(MaxRequestWorkers\s*\)[0-9]\+/\1${OPTIMAL_MRW}/" "$APACHE_CONF"
+    # Update MaxClients as fallback for older Apache
+    sed -i "s/\(MaxClients\s*\)[0-9]\+/\1${OPTIMAL_MRW}/" "$APACHE_CONF"
+    MRW_UPDATED=true
+  fi
+
+  # If no existing MPM module config found, add one
+  if ! grep -qi "<IfModule mpm_prefork_module>" "$APACHE_CONF" 2>/dev/null && \
+     ! grep -qi "<IfModule mpm_worker_module>" "$APACHE_CONF" 2>/dev/null; then
     cat >> "$APACHE_CONF" <<EOF
 
 # Graywell tuning — $(date '+%Y-%m-%d')
@@ -633,8 +666,10 @@ if is_approved "apache_mrw" && [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CON
     MaxConnectionsPerChild   500
 </IfModule>
 EOF
+    MRW_UPDATED=true
   fi
-  tuned "Apache MaxRequestWorkers set to ${OPTIMAL_MRW}"
+
+  $MRW_UPDATED && tuned "Apache MaxRequestWorkers set to ${OPTIMAL_MRW}" || warn "Apache config exists but MaxRequestWorkers not found"
   NEED_APACHE_RESTART=true
 fi
 
