@@ -99,6 +99,63 @@ for path in \
   [ -f "$path" ] && { MYSQL_CONF="$path"; break; }
 done
 
+# ── Detect Apache MPM config (auto-finds correct location) ────
+find_apache_mpm_conf() {
+  local apache_root="" mpm_conf=""
+
+  # Determine Apache root
+  if [ -d /opt/bitnami/apache ]; then
+    apache_root="/opt/bitnami/apache"
+  elif [ -d /bitnami/apache2 ]; then
+    apache_root="/bitnami/apache2"
+  else
+    apache_root="/etc/apache2"
+  fi
+
+  # Priority 1: mods-enabled (modern Debian/Ubuntu - most likely to be active)
+  if [ -d "$apache_root/mods-enabled" ]; then
+    for mpm in "$apache_root/mods-enabled"/mpm_*.conf; do
+      [ -f "$mpm" ] && { mpm_conf="$mpm"; break; }
+    done
+  fi
+
+  # Priority 2: mods-available (fallback for Debian/Ubuntu)
+  if [ -z "$mpm_conf" ] && [ -d "$apache_root/mods-available" ]; then
+    for mpm in "$apache_root/mods-available"/mpm_*.conf; do
+      [ -f "$mpm" ] && { mpm_conf="$mpm"; break; }
+    done
+  fi
+
+  # Priority 3: RHEL/CentOS style
+  if [ -z "$mpm_conf" ] && [ -d "/etc/httpd/conf.modules.d" ]; then
+    for mpm in /etc/httpd/conf.modules.d/*mpm*.conf; do
+      [ -f "$mpm" ] && { mpm_conf="$mpm"; break; }
+    done
+  fi
+
+  # Priority 4: Bitnami main config
+  if [ -z "$mpm_conf" ] && [ -f "$apache_root/conf/httpd.conf" ]; then
+    mpm_conf="$apache_root/conf/httpd.conf"
+  fi
+
+  # Priority 5: Create new in appropriate directory
+  if [ -z "$mpm_conf" ]; then
+    if [ -d "$apache_root/mods-available" ]; then
+      mpm_conf="$apache_root/mods-available/graywell-mpm.conf"
+    elif [ -d "$apache_root/conf.d" ]; then
+      mpm_conf="$apache_root/conf.d/graywell-mpm.conf"
+    elif [ -d "/etc/apache2/conf.d" ]; then
+      mpm_conf="/etc/apache2/conf.d/graywell-mpm.conf"
+    else
+      mpm_conf="$apache_root/graywell-mpm.conf"
+    fi
+  fi
+
+  echo "$mpm_conf"
+}
+
+APACHE_MPM_CONF=$(find_apache_mpm_conf)
+
 # ──────────────────────────────────────────
 # 1. INSTALL BENCHMARK TOOLS
 # ──────────────────────────────────────────
@@ -642,21 +699,26 @@ if is_approved "apache_mrw" && [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CON
     echo "KeepAlive On" >> "$APACHE_CONF"
   fi
 
-  # MaxRequestWorkers — try to update existing value first (handles spacing variations)
+  # MaxRequestWorkers — use auto-detected MPM config location
+  # APACHE_MPM_CONF was already detected at the top of the script
+
   MRW_UPDATED=false
-  if grep -qiE "MaxRequestWorkers|MaxClients" "$APACHE_CONF" 2>/dev/null; then
-    # Update MaxRequestWorkers (case-insensitive, flexible spacing)
-    sed -i "s/\(MaxRequestWorkers\s*\)[0-9]\+/\1${OPTIMAL_MRW}/" "$APACHE_CONF"
-    # Update MaxClients as fallback for older Apache
-    sed -i "s/\(MaxClients\s*\)[0-9]\+/\1${OPTIMAL_MRW}/" "$APACHE_CONF"
+
+  # Ensure directory exists
+  if [ ! -d "$(dirname "$APACHE_MPM_CONF")" ]; then
+    mkdir -p "$(dirname "$APACHE_MPM_CONF")"
+  fi
+
+  # Try to update existing value
+  if [ -f "$APACHE_MPM_CONF" ] && grep -qi "MaxRequestWorkers\|MaxClients" "$APACHE_MPM_CONF" 2>/dev/null; then
+    sed -i "s/\(MaxRequestWorkers\s*\)[0-9]\+/\1${OPTIMAL_MRW}/" "$APACHE_MPM_CONF"
+    sed -i "s/\(MaxClients\s*\)[0-9]\+/\1${OPTIMAL_MRW}/" "$APACHE_MPM_CONF"
     MRW_UPDATED=true
   fi
 
-  # If no existing MPM module config found, add one
-  if ! grep -qi "<IfModule mpm_prefork_module>" "$APACHE_CONF" 2>/dev/null && \
-     ! grep -qi "<IfModule mpm_worker_module>" "$APACHE_CONF" 2>/dev/null; then
-    cat >> "$APACHE_CONF" <<EOF
-
+  # If no existing value, append new MPM block
+  if [ "$MRW_UPDATED" = "false" ]; then
+    cat >> "$APACHE_MPM_CONF" <<EOF
 # Graywell tuning — $(date '+%Y-%m-%d')
 <IfModule mpm_prefork_module>
     StartServers             3
@@ -669,7 +731,12 @@ EOF
     MRW_UPDATED=true
   fi
 
-  $MRW_UPDATED && tuned "Apache MaxRequestWorkers set to ${OPTIMAL_MRW}" || warn "Apache config exists but MaxRequestWorkers not found"
+  if [ "$MRW_UPDATED" = "true" ]; then
+    tuned "Apache MaxRequestWorkers set to ${OPTIMAL_MRW} in $APACHE_MPM_CONF"
+  else
+    warn "Could not update Apache MPM config"
+  fi
+
   NEED_APACHE_RESTART=true
 fi
 
