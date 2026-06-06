@@ -491,10 +491,10 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
   for issue in "${ISSUES[@]}"; do
     IFS='|' read -r severity desc <<< "$issue"
     case $severity in
-      FAIL) symbol="${RED}[FAIL]${NC}"; action="MUST FIX" ;;
-      WARN) symbol="${YEL}[WARN]${NC}"; action="Review" ;;
+      FAIL) symbol="[FAIL]"; color="$RED" ;;
+      WARN) symbol="[WARN]"; color="$YEL" ;;
     esac
-    printf "%d. %s  %s\n" $((idx+1)) "$symbol" "$desc"
+    echo -e "$((idx+1)). ${color}${symbol}${NC}  $desc"
     ((idx++))
   done
 
