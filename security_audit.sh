@@ -70,20 +70,23 @@ SSHD=/etc/ssh/sshd_config
 
 check_ssh() {
   local key=$1 desired=$2 desc=$3
-  # Extract value more carefully to avoid whitespace issues
-  local val=$(grep -iE "^${key}\s" "$SSHD" 2>/dev/null | head -1 | awk '{print $NF}' | tr -d ' ')
+  local val output
 
-  # If not found, show default
-  if [ -z "$val" ]; then
-    val="(not set/default)"
-  fi
+  # Extract the value carefully
+  val=$(grep -iE "^${key}\s" "$SSHD" 2>/dev/null | head -1 | awk '{print $2}' | xargs)
 
-  # Compare and output on single line
+  # Default if empty
+  [ -z "$val" ] && val="(not set/default)"
+
+  # Build output message (don't call ok/bad, build string directly)
   if [ "$val" = "$desired" ]; then
-    ok "$desc: $val"
+    output="  ${GRN}[OK]${NC}     ${desc}: ${val}"
   else
-    bad "$desc: $val (should be: $desired)"
+    output="  ${RED}[FAIL]${NC}   ${desc}: ${val} (should be: ${desired})"
   fi
+
+  # Print the entire message at once
+  echo -e "$output"
 }
 
 [ -f "$SSHD" ] || { bad "sshd_config not found"; }
