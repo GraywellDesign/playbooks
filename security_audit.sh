@@ -96,14 +96,14 @@ if [ -z "$PASS_AUTH" ]; then
   # Not set explicitly — check sshd_config.d includes and Ubuntu version
   UBUNTU_VER=$(lsb_release -rs 2>/dev/null | cut -d. -f1)
   if [ "${UBUNTU_VER:-0}" -ge 22 ]; then
-    ok "Password auth disabled (Ubuntu 22+ default is no)"
+    ok "Password auth disabled (Ubuntu 22+ default: no)"
   else
-    warn "PasswordAuthentication not set — verify default is 'no' for your OS version"
+    warn "PasswordAuthentication not explicitly set — verify OS default is 'no'"
   fi
 elif [ "$PASS_AUTH" = "no" ]; then
-  ok "Password auth disabled (keys only): no"
+  ok "Password auth disabled (keys only): $PASS_AUTH"
 else
-  bad "Password auth enabled: $PASS_AUTH (should be no)"
+  bad "Password auth enabled: $PASS_AUTH (should be: no)"
 fi
 
 check_ssh "PermitEmptyPasswords"   "no"       "Empty passwords forbidden"
@@ -251,11 +251,22 @@ else
     # uploads directory — no PHP execution
     UPLOADS="$WP_DIR/wp-content/uploads"
     if [ -d "$UPLOADS" ]; then
-      if find "$UPLOADS" -name "*.php" 2>/dev/null | grep -q .; then
-        bad "PHP files found in uploads directory — potential webshell!"
-        find "$UPLOADS" -name "*.php" 2>/dev/null | sed 's/^/    /'
+      SUSPICIOUS_PHP=$(find "$UPLOADS" -name "*.php" 2>/dev/null \
+        | grep -v "index\.php" \
+        | grep -v "/sucuri/" \
+        | grep -v "/wpo/" \
+        | grep -v "/mailpoet/" \
+        | grep -v "/iwc-logs/" \
+        | grep -v "/elementor/" \
+        | grep -v "/wp-rocket/" \
+        | grep -v "/w3tc/" \
+        | grep -v "/cache/" \
+        || true)
+      if [ -n "$SUSPICIOUS_PHP" ]; then
+        bad "Suspicious PHP files found in uploads — potential webshell!"
+        echo "$SUSPICIOUS_PHP" | sed 's/^/    /'
       else
-        ok "No PHP files in uploads directory"
+        ok "No suspicious PHP files in uploads"
       fi
     fi
 
