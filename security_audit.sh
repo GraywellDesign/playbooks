@@ -68,27 +68,6 @@ section "3. SSH CONFIGURATION"
 # ──────────────────────────────────────────
 SSHD=/etc/ssh/sshd_config
 
-check_ssh() {
-  local key=$1 desired=$2 desc=$3
-  local val output
-
-  # Extract the value carefully
-  val=$(grep -iE "^${key}\s" "$SSHD" 2>/dev/null | head -1 | awk '{print $2}' | xargs)
-
-  # Default if empty
-  [ -z "$val" ] && val="(not set/default)"
-
-  # Build output message (don't call ok/bad, build string directly)
-  if [ "$val" = "$desired" ]; then
-    output="  ${GRN}[OK]${NC}     ${desc}: ${val}"
-  else
-    output="  ${RED}[FAIL]${NC}   ${desc}: ${val} (should be: ${desired})"
-  fi
-
-  # Print the entire message at once
-  echo -e "$output"
-}
-
 [ -f "$SSHD" ] || { bad "sshd_config not found"; }
 
 # PermitRootLogin — accept both "no" and "prohibit-password" (key-only root is acceptable)
@@ -116,9 +95,17 @@ else
   bad "Password auth enabled: $PASS_AUTH (should be: no)"
 fi
 
-check_ssh "PermitEmptyPasswords"   "no"       "Empty passwords forbidden"
-check_ssh "X11Forwarding"          "no"       "X11 forwarding disabled"
-check_ssh "UsePAM"                 "yes"      "PAM enabled"
+# PermitEmptyPasswords
+PEP=$(grep -iE "^PermitEmptyPasswords\s" "$SSHD" 2>/dev/null | awk '{print $2}')
+[ "$PEP" = "no" ] && ok "Empty passwords forbidden: $PEP" || bad "Empty passwords: ${PEP:-(not set)}"
+
+# X11Forwarding
+X11=$(grep -iE "^X11Forwarding\s" "$SSHD" 2>/dev/null | awk '{print $2}')
+[ "$X11" = "no" ] && ok "X11 forwarding disabled: $X11" || bad "X11 forwarding: ${X11:-(not set)}"
+
+# UsePAM
+PAM=$(grep -iE "^UsePAM\s" "$SSHD" 2>/dev/null | awk '{print $2}')
+[ "$PAM" = "yes" ] && ok "PAM enabled: $PAM" || bad "PAM: ${PAM:-(not set)}"
 # Protocol directive removed in modern OpenSSH — SSH2 is always used now
 SSH_VER=$(ssh -V 2>&1 | grep -oP 'OpenSSH_\K[\d.]+' | head -1)
 if [ -n "$SSH_VER" ]; then
