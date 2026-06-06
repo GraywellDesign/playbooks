@@ -588,11 +588,19 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       if grep -q "WARN.*packages upgradable\|FAIL.*packages" <<< "${ISSUES[*]}"; then
         echo -e "\n${GRN}[APPLY]${NC}  Updating system packages..."
         if command -v apt &>/dev/null; then
-          sudo apt-get update -qq && sudo apt-get upgrade -y -qq
+          if sudo apt-get update -qq 2>/dev/null && sudo apt-get upgrade -y -qq 2>/dev/null; then
+            echo "✓ System packages updated"
+          else
+            echo "${YEL}⚠ Package update had issues (repo or key problems) — may need manual fix${NC}"
+            echo "  Try: sudo apt-get update && sudo apt-get upgrade"
+          fi
         elif command -v yum &>/dev/null; then
-          sudo yum update -y -q
+          if sudo yum update -y -q 2>/dev/null; then
+            echo "✓ System packages updated"
+          else
+            echo "${YEL}⚠ Package update failed — check yum repos${NC}"
+          fi
         fi
-        echo "✓ System packages updated"
       fi
 
       # Fix 2: Enable PasswordAuthentication
@@ -601,8 +609,12 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         if ! grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config; then
           echo "PasswordAuthentication no" | sudo tee -a /etc/ssh/sshd_config > /dev/null
         fi
-        sudo sshd -t 2>/dev/null && sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null
-        echo "✓ SSH password auth disabled (keys only)"
+        if sudo sshd -t 2>/dev/null; then
+          sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null
+          echo "✓ SSH password auth disabled (keys only)"
+        else
+          echo "${YEL}⚠ SSH config has syntax error — fix manually${NC}"
+        fi
       fi
 
       # Fix 3: Enable UFW (if available)
@@ -616,13 +628,17 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       if grep -q "Fail2ban not installed" <<< "${ISSUES[*]}"; then
         echo -e "\n${GRN}[APPLY]${NC}  Installing fail2ban..."
         if command -v apt &>/dev/null; then
-          sudo apt-get install fail2ban -y -qq
+          sudo apt-get install fail2ban -y -qq 2>/dev/null
         elif command -v yum &>/dev/null; then
-          sudo yum install fail2ban -y -q
+          sudo yum install fail2ban -y -q 2>/dev/null
         fi
-        sudo systemctl enable fail2ban > /dev/null 2>&1
-        sudo systemctl start fail2ban > /dev/null 2>&1
-        echo "✓ Fail2ban installed and enabled"
+        if command -v fail2ban-client &>/dev/null; then
+          sudo systemctl enable fail2ban > /dev/null 2>&1
+          sudo systemctl start fail2ban > /dev/null 2>&1
+          echo "✓ Fail2ban installed and enabled"
+        else
+          echo "${YEL}⚠ Fail2ban install may have failed — try: sudo apt-get install fail2ban -y${NC}"
+        fi
       fi
 
       # Fix 5: Enable auto-updates (detect distro)
@@ -645,7 +661,19 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         echo "✓ /etc/shadow permissions fixed"
       fi
 
-      # Fix 7: Bind MySQL to localhost (all distros/setups)
+      # Fix 7: Fix wp-config.php permissions (CRITICAL)
+      if grep -q "wp-config.php permissions.*DANGER\|DANGER.*contains DB password" <<< "${ISSUES[*]}"; then
+        echo -e "\n${RED}[CRITICAL FIX]${NC}  Securing wp-config.php..."
+        WP_CONFIGS=$(find /var/www /bitnami /opt/bitnami /home /srv -name "wp-config.php" -not -path "*/wp-config-sample.php" 2>/dev/null)
+        if [ -n "$WP_CONFIGS" ]; then
+          while IFS= read -r wpconfig; do
+            sudo chmod 640 "$wpconfig"
+            echo "✓ Fixed: $wpconfig (640)"
+          done <<< "$WP_CONFIGS"
+        fi
+      fi
+
+      # Fix 8: Bind MySQL to localhost (all distros/setups)
       if grep -q "MySQL bound to 0.0.0.0\|EXPOSED TO INTERNET" <<< "${ISSUES[*]}"; then
         echo -e "\n${GRN}[APPLY]${NC}  Binding MySQL to localhost only..."
         if [ -f /etc/mysql/mysql.conf.d/mysqld.cnf ] && ! grep -q "bind-address = 127.0.0.1" /etc/mysql/mysql.conf.d/mysqld.cnf; then
