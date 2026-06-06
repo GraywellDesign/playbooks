@@ -354,6 +354,7 @@ fi
 # ──────────────────────────────────────────
 section "8. Calculating Recommended Settings"
 
+# Base formulas (industry standard)
 if [ "$TOTAL_RAM_MB" -le 1024 ]; then
   OPTIMAL_BUFFER_MB=128;  OPTIMAL_MAX_CONN=50;  OPTIMAL_FPM_CHILDREN=5;  OPTIMAL_FPM_MIN=2; OPTIMAL_FPM_MAX_REQ=200
 elif [ "$TOTAL_RAM_MB" -le 2048 ]; then
@@ -368,14 +369,82 @@ OPTIMAL_MRW=$(( TOTAL_RAM_MB / 50 ))
 [ "$OPTIMAL_MRW" -lt 10 ]  && OPTIMAL_MRW=10
 [ "$OPTIMAL_MRW" -gt 150 ] && OPTIMAL_MRW=150
 
+# ── Smart Safety Guards ──────────────────────
+info "Applying safety guards and context-aware adjustments..."
+
+# Guard 1: Buffer pool should never exceed 50% of total RAM
+BUFFER_POOL_MAX=$(( TOTAL_RAM_MB / 2 ))
+if [ "$OPTIMAL_BUFFER_MB" -gt "$BUFFER_POOL_MAX" ]; then
+  warn "Buffer pool would exceed 50% of RAM — capping at ${BUFFER_POOL_MAX}MB"
+  OPTIMAL_BUFFER_MB=$BUFFER_POOL_MAX
+fi
+
+# Guard 2: Check if swap is being actively used (sign of memory pressure)
+SWAP_USED=$(free -m 2>/dev/null | grep Swap | awk '{print $3}')
+if [ "${SWAP_USED:-0}" -gt 100 ]; then
+  warn "Swap usage detected (${SWAP_USED}MB) — reducing worker processes to prevent thrashing"
+  OPTIMAL_MRW=$(( OPTIMAL_MRW / 2 ))
+  [ "$OPTIMAL_MRW" -lt 5 ] && OPTIMAL_MRW=5
+  OPTIMAL_FPM_CHILDREN=$(( OPTIMAL_FPM_CHILDREN / 2 ))
+  [ "$OPTIMAL_FPM_CHILDREN" -lt 2 ] && OPTIMAL_FPM_CHILDREN=2
+  info "Adjusted for swap pressure: MRW=${OPTIMAL_MRW}, FPM=${OPTIMAL_FPM_CHILDREN}"
+fi
+
+# Guard 3: Check for high slow queries (sign of undersized buffer pool)
+if command -v mysql &>/dev/null && [ -n "$MYSQL_CONF" ]; then
+  SLOW_QUERY_COUNT=$(mysql --defaults-file=/root/.my.cnf --connect-timeout=3 \
+    -e "SHOW STATUS LIKE 'Slow_queries';" 2>/dev/null | grep Slow_queries | awk '{print $2}' || echo "0")
+
+  if [ "${SLOW_QUERY_COUNT:-0}" -gt 10 ]; then
+    warn "High slow query count (${SLOW_QUERY_COUNT}) — increasing buffer pool"
+    OPTIMAL_BUFFER_MB=$(( OPTIMAL_BUFFER_MB * 3 / 2 ))  # Increase by 50%
+    # Still respect 50% RAM ceiling
+    if [ "$OPTIMAL_BUFFER_MB" -gt "$BUFFER_POOL_MAX" ]; then
+      OPTIMAL_BUFFER_MB=$BUFFER_POOL_MAX
+    fi
+    info "Adjusted buffer pool to ${OPTIMAL_BUFFER_MB}MB for slow query optimization"
+  fi
+fi
+
+# Guard 4: If server is under 1GB, be more conservative
+if [ "$TOTAL_RAM_MB" -lt 1024 ]; then
+  warn "Low RAM server (<1GB) — using conservative settings to prevent OOM"
+  OPTIMAL_MRW=$(( OPTIMAL_MRW / 2 ))
+  [ "$OPTIMAL_MRW" -lt 3 ] && OPTIMAL_MRW=3
+  OPTIMAL_FPM_CHILDREN=$(( OPTIMAL_FPM_CHILDREN / 2 ))
+  [ "$OPTIMAL_FPM_CHILDREN" -lt 1 ] && OPTIMAL_FPM_CHILDREN=1
+fi
+
+# Guard 5: Warn if available RAM is significantly less than total (bloat)
+RAM_USED=$(( TOTAL_RAM_MB - AVAIL_RAM_MB ))
+RAM_USAGE_PCT=$(( RAM_USED * 100 / TOTAL_RAM_MB ))
+if [ "$RAM_USAGE_PCT" -gt 80 ]; then
+  warn "Memory usage is high (${RAM_USAGE_PCT}%) — current bloat may limit optimization gains"
+  info "Consider: killing unused processes, upgrading RAM, or running on smaller server"
+fi
+
 # Gather current values for comparison
 CUR_SWAPPINESS=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
 CUR_SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null || echo "?")
 CUR_FILEMAX=$(sysctl -n fs.file-max 2>/dev/null || echo "?")
+
+# MySQL: Get actual running values (from SHOW VARIABLES, not config file)
+# This is more reliable since MySQL might have defaults applied
 CUR_BUFFER_MB=$(mysql --defaults-file=/root/.my.cnf -e "SHOW VARIABLES LIKE 'innodb_buffer_pool_size';" --skip-column-names 2>/dev/null | awk '{printf "%dMB", $2/1024/1024}' || echo "?")
 CUR_MAX_CONN=$(mysql --defaults-file=/root/.my.cnf -e "SHOW VARIABLES LIKE 'max_connections';" --skip-column-names 2>/dev/null | awk '{print $2}' || echo "?")
+
+# Convert to numbers for comparison (remove "MB" suffix)
+CUR_BUFFER_NUM=$(echo "$CUR_BUFFER_MB" | sed 's/MB//')
+CUR_MAX_CONN_NUM="$CUR_MAX_CONN"
+
+# PHP-FPM
 CUR_FPM_CHILDREN=$(grep -E "^pm\.max_children" "$PHP_FPM_POOL" 2>/dev/null | awk -F= '{print $2}' | tr -d ' ' || echo "?")
-CUR_MRW=$(grep -iE "^MaxRequestWorkers|^MaxClients" "$APACHE_CONF" 2>/dev/null | awk '{print $2}' | head -1 || echo "not set")
+
+# Apache: Check in the actual MPM config file where it was written, not the main config
+# Search with flexible whitespace handling
+CUR_MRW=$(grep -iE "MaxRequestWorkers|MaxClients" "$APACHE_MPM_CONF" 2>/dev/null | grep -oE "[0-9]+" | head -1 || echo "")
+[ -z "$CUR_MRW" ] && CUR_MRW="not set"
+
 CUR_OPCACHE=$(php -r 'echo ini_get("opcache.enable");' 2>/dev/null || echo "?")
 SWAP_TOTAL=$(free -m | grep Swap | awk '{print $2}')
 
@@ -434,25 +503,31 @@ if [ "$CUR_FILEMAX" != "500000" ]; then
   idx=$((idx+1))
 fi
 
-# MySQL: buffer pool
+# MySQL: buffer pool (only recommend if different)
 if (command -v mysql &>/dev/null) && [ -n "$MYSQL_CONF" ]; then
-  CHANGE_KEYS[$idx]="mysql_buffer"
-  CHANGE_DESCS[$idx]="innodb_buffer_pool_size"
-  CHANGE_CURRENTS[$idx]="${CUR_BUFFER_MB}"
-  CHANGE_RECS[$idx]="${OPTIMAL_BUFFER_MB}MB"
-  CHANGE_IMPACTS[$idx]="Faster DB queries, less disk I/O"
-  CHANGE_APPLY[$idx]=true
-  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "innodb_buffer_pool_size" "$CUR_BUFFER_MB" "${OPTIMAL_BUFFER_MB}MB" "Faster DB queries"
-  idx=$((idx+1))
+  # Compare numeric values for buffer pool (strip MB suffix)
+  if [ "$CUR_BUFFER_NUM" != "$OPTIMAL_BUFFER_MB" ]; then
+    CHANGE_KEYS[$idx]="mysql_buffer"
+    CHANGE_DESCS[$idx]="innodb_buffer_pool_size"
+    CHANGE_CURRENTS[$idx]="${CUR_BUFFER_MB}"
+    CHANGE_RECS[$idx]="${OPTIMAL_BUFFER_MB}MB"
+    CHANGE_IMPACTS[$idx]="Faster DB queries, less disk I/O"
+    CHANGE_APPLY[$idx]=true
+    printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "innodb_buffer_pool_size" "$CUR_BUFFER_MB" "${OPTIMAL_BUFFER_MB}MB" "Faster DB queries"
+    idx=$((idx+1))
+  fi
 
-  CHANGE_KEYS[$idx]="mysql_maxconn"
-  CHANGE_DESCS[$idx]="max_connections"
-  CHANGE_CURRENTS[$idx]="${CUR_MAX_CONN}"
-  CHANGE_RECS[$idx]="${OPTIMAL_MAX_CONN}"
-  CHANGE_IMPACTS[$idx]="Right-size connection pool"
-  CHANGE_APPLY[$idx]=true
-  printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "max_connections" "$CUR_MAX_CONN" "$OPTIMAL_MAX_CONN" "Right-size connection pool"
-  idx=$((idx+1))
+  # Compare max_connections
+  if [ "$CUR_MAX_CONN_NUM" != "$OPTIMAL_MAX_CONN" ]; then
+    CHANGE_KEYS[$idx]="mysql_maxconn"
+    CHANGE_DESCS[$idx]="max_connections"
+    CHANGE_CURRENTS[$idx]="${CUR_MAX_CONN}"
+    CHANGE_RECS[$idx]="${OPTIMAL_MAX_CONN}"
+    CHANGE_IMPACTS[$idx]="Right-size connection pool"
+    CHANGE_APPLY[$idx]=true
+    printf "  ${YEL}%-35s${NC} %-15s %-15s %s\n" "max_connections" "$CUR_MAX_CONN" "$OPTIMAL_MAX_CONN" "Right-size connection pool"
+    idx=$((idx+1))
+  fi
 fi
 
 # PHP-FPM: max_children
@@ -479,8 +554,8 @@ if command -v php &>/dev/null && [ -n "$OPCACHE_INI" ] && [ ! -f "$OPCACHE_INI" 
   idx=$((idx+1))
 fi
 
-# Apache MaxRequestWorkers
-if [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CONF" ]; then
+# Apache MaxRequestWorkers (only recommend if different)
+if [ "$WEB_SERVER" = "apache" ] && [ -n "$APACHE_CONF" ] && [ "$CUR_MRW" != "$OPTIMAL_MRW" ]; then
   CHANGE_KEYS[$idx]="apache_mrw"
   CHANGE_DESCS[$idx]="MaxRequestWorkers"
   CHANGE_CURRENTS[$idx]="${CUR_MRW}"
