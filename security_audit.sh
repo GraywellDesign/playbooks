@@ -70,12 +70,19 @@ SSHD=/etc/ssh/sshd_config
 
 check_ssh() {
   local key=$1 desired=$2 desc=$3
-  val=$(grep -iE "^${key}\s" "$SSHD" 2>/dev/null | awk '{print $2}')
-  val=${val:-"(not set/default)"}
-  if [[ "$val" == "$desired" ]]; then
+  # Extract value more carefully to avoid whitespace issues
+  local val=$(grep -iE "^${key}\s" "$SSHD" 2>/dev/null | head -1 | awk '{print $NF}' | tr -d ' ')
+
+  # If not found, show default
+  if [ -z "$val" ]; then
+    val="(not set/default)"
+  fi
+
+  # Compare and output on single line
+  if [ "$val" = "$desired" ]; then
     ok "$desc: $val"
   else
-    bad "$desc: $val (should be $desired)"
+    bad "$desc: $val (should be: $desired)"
   fi
 }
 
