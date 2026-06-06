@@ -81,7 +81,11 @@ fi
 
 # PasswordAuthentication — check effective value (Ubuntu 22.04+ defaults to no)
 PASS_AUTH=$(grep -iE "^PasswordAuthentication\s" "$SSHD" 2>/dev/null | awk '{print $2}')
-if [ -z "$PASS_AUTH" ]; then
+if [ "$PASS_AUTH" = "no" ]; then
+  ok "Password auth disabled: no"
+elif [ "$PASS_AUTH" = "yes" ]; then
+  bad "Password auth enabled: yes (should be: no)"
+else
   # Not set explicitly — check sshd_config.d includes and Ubuntu version
   UBUNTU_VER=$(lsb_release -rs 2>/dev/null | cut -d. -f1)
   if [ "${UBUNTU_VER:-0}" -ge 22 ]; then
@@ -89,10 +93,6 @@ if [ -z "$PASS_AUTH" ]; then
   else
     warn "PasswordAuthentication not explicitly set — verify OS default is 'no'"
   fi
-elif [ "$PASS_AUTH" = "no" ]; then
-  ok "Password auth disabled (keys only): $PASS_AUTH"
-else
-  bad "Password auth enabled: $PASS_AUTH (should be: no)"
 fi
 
 # PermitEmptyPasswords
