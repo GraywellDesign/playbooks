@@ -279,7 +279,9 @@ else
     info "WordPress install: $WP_DIR"
 
     # wp-config.php (contains DB password — must be protected)
-    CONF_PERM=$(stat -c "%a" "$WP_CONFIG" 2>/dev/null)
+    # Use -L to follow symlinks to check actual file, not the link itself
+    CONF_PERM=$(stat -L -c "%a" "$WP_CONFIG" 2>/dev/null)
+    CONF_TARGET=$(stat -L -c "%n" "$WP_CONFIG" 2>/dev/null)
     [ "$CONF_PERM" -le 640 ] && ok "wp-config.php permissions: $CONF_PERM (correct — not world-readable)" \
       || bad "wp-config.php permissions: $CONF_PERM (DANGER — contains DB password, should be 600 or 640)"
 
