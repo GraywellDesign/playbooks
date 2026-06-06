@@ -510,72 +510,127 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
   case $remediation_choice in
     R|r)
       section "REMEDIATION COMMANDS"
-      echo -e "\n${BOLD}Copy and paste these commands to fix issues:${NC}\n"
+      echo -e "\n${BOLD}Copy and paste these commands to fix issues found above:${NC}\n"
 
-      # Detect environment
-      IS_BITNAMI=false
-      MYSQL_SERVICE="mysql"
-      { [ -d /opt/bitnami ] || [ -d /bitnami ]; } && IS_BITNAMI=true
-      command -v mariadb &>/dev/null && MYSQL_SERVICE="mariadb"
+      cmd_num=1
 
-      # Provide manual fix commands (compatible with all setups)
-      echo "# 1. UPDATE SYSTEM PACKAGES"
-      if command -v apt &>/dev/null; then
-        echo "sudo apt-get update && sudo apt-get upgrade -y"
-      elif command -v yum &>/dev/null; then
-        echo "sudo yum update -y"
+      # Check what issues exist and show relevant commands
+      ISSUES_STR="${ISSUES[*]}"
+
+      # 1. UPDATE SYSTEM PACKAGES
+      if [[ "$ISSUES_STR" == *"packages upgradable"* ]]; then
+        echo "# $cmd_num. UPDATE SYSTEM PACKAGES"
+        if command -v apt &>/dev/null; then
+          echo "sudo apt-get update && sudo apt-get upgrade -y"
+        elif command -v yum &>/dev/null; then
+          echo "sudo yum update -y"
+        fi
+        echo ""
+        ((cmd_num++))
       fi
-      echo ""
 
-      echo "# 2. SET SSH PASSWORDAUTHENTICATION (disable password, keys only)"
-      echo "echo 'PasswordAuthentication no' | sudo tee -a /etc/ssh/sshd_config"
-      echo "sudo sshd -t && sudo systemctl restart ssh"
-      echo ""
-
-      echo "# 3. ENABLE UFW FIREWALL (Debian/Ubuntu)"
-      echo "sudo ufw enable"
-      echo "sudo ufw allow 22/tcp  # SSH"
-      echo "sudo ufw allow 80/tcp  # HTTP"
-      echo "sudo ufw allow 443/tcp # HTTPS"
-      echo ""
-
-      echo "# 4. INSTALL/ENABLE FAIL2BAN"
-      if command -v apt &>/dev/null; then
-        echo "sudo apt-get install fail2ban -y"
-      elif command -v yum &>/dev/null; then
-        echo "sudo yum install fail2ban -y"
+      # 2. SET SSH PASSWORDAUTHENTICATION
+      if [[ "$ISSUES_STR" == *"PasswordAuthentication not explicitly set"* ]]; then
+        echo "# $cmd_num. SET SSH PASSWORDAUTHENTICATION (disable password, keys only)"
+        echo "echo 'PasswordAuthentication no' | sudo tee -a /etc/ssh/sshd_config"
+        echo "sudo sshd -t && sudo systemctl restart ssh"
+        echo ""
+        ((cmd_num++))
       fi
-      echo "sudo systemctl enable fail2ban && sudo systemctl start fail2ban"
-      echo ""
 
-      echo "# 5. ENABLE AUTOMATIC SECURITY UPDATES"
-      if command -v apt &>/dev/null; then
-        echo "sudo apt-get install unattended-upgrades -y"
-        echo "sudo dpkg-reconfigure -plow unattended-upgrades"
-      elif command -v yum &>/dev/null; then
-        echo "sudo yum install yum-cron -y"
-        echo "sudo systemctl enable yum-cron && sudo systemctl start yum-cron"
+      # 3. ENABLE UFW FIREWALL
+      if [[ "$ISSUES_STR" == *"UFW installed but INACTIVE"* ]]; then
+        echo "# $cmd_num. ENABLE UFW FIREWALL (Debian/Ubuntu)"
+        echo "sudo ufw enable"
+        echo "sudo ufw allow 22/tcp  # SSH"
+        echo "sudo ufw allow 80/tcp  # HTTP"
+        echo "sudo ufw allow 443/tcp # HTTPS"
+        echo ""
+        ((cmd_num++))
       fi
-      echo ""
 
-      echo "# 6. FIX FILE PERMISSIONS"
-      echo "sudo chmod 640 /etc/shadow"
-      echo ""
-
-      echo "# 7. BIND DATABASE TO LOCALHOST ONLY"
-      if [ -f /etc/mysql/mysql.conf.d/mysqld.cnf ]; then
-        echo "echo 'bind-address = 127.0.0.1' | sudo tee -a /etc/mysql/mysql.conf.d/mysqld.cnf"
-      elif [ -f /etc/mysql/mariadb.conf.d/50-server.cnf ]; then
-        echo "echo 'bind-address = 127.0.0.1' | sudo tee -a /etc/mysql/mariadb.conf.d/50-server.cnf"
-      elif [ -f /etc/my.cnf ]; then
-        echo "echo 'bind-address = 127.0.0.1' | sudo tee -a /etc/my.cnf"
-      elif [ -f /opt/bitnami/mariadb/conf/my.cnf ]; then
-        echo "echo 'bind-address = 127.0.0.1' | sudo tee -a /opt/bitnami/mariadb/conf/my.cnf"
+      # 4. INSTALL/ENABLE FAIL2BAN
+      if [[ "$ISSUES_STR" == *"Fail2ban not installed"* ]]; then
+        echo "# $cmd_num. INSTALL/ENABLE FAIL2BAN"
+        if command -v apt &>/dev/null; then
+          echo "sudo apt-get install fail2ban -y"
+        elif command -v yum &>/dev/null; then
+          echo "sudo yum install fail2ban -y"
+        fi
+        echo "sudo systemctl enable fail2ban && sudo systemctl start fail2ban"
+        echo ""
+        ((cmd_num++))
       fi
-      echo "sudo systemctl restart $MYSQL_SERVICE"
-      echo ""
 
-      echo "# 8. VERIFY FIXES (run audit again)"
+      # 5. ENABLE AUTOMATIC SECURITY UPDATES
+      if [[ "$ISSUES_STR" == *"unattended-upgrades not installed"* ]] || [[ "$ISSUES_STR" == *"yum-cron"* ]]; then
+        echo "# $cmd_num. ENABLE AUTOMATIC SECURITY UPDATES"
+        if command -v apt &>/dev/null; then
+          echo "sudo apt-get install unattended-upgrades -y"
+          echo "sudo dpkg-reconfigure -plow unattended-upgrades"
+        elif command -v yum &>/dev/null; then
+          echo "sudo yum install yum-cron -y"
+          echo "sudo systemctl enable yum-cron && sudo systemctl start yum-cron"
+        fi
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 6. FIX FILE PERMISSIONS
+      if [[ "$ISSUES_STR" == *"/etc/shadow"* ]] && [[ "$ISSUES_STR" == *"640"* ]]; then
+        echo "# $cmd_num. FIX FILE PERMISSIONS"
+        echo "sudo chmod 640 /etc/shadow"
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 7. FIX wp-config.php PERMISSIONS
+      if [[ "$ISSUES_STR" == *"wp-config.php"* ]] && [[ "$ISSUES_STR" == *"DANGER"* ]]; then
+        echo "# $cmd_num. FIX wp-config.php PERMISSIONS (CRITICAL)"
+        echo "# Find and fix all WordPress installs:"
+        echo "find /var/www /bitnami /opt/bitnami /home /srv -name 'wp-config.php' -not -path '*/wp-config-sample.php' 2>/dev/null | while read f; do sudo chmod 640 \"\$f\"; done"
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 8. BIND DATABASE TO LOCALHOST
+      if [[ "$ISSUES_STR" == *"MySQL bound to 0.0.0.0"* ]] || [[ "$ISSUES_STR" == *"EXPOSED TO INTERNET"* ]]; then
+        echo "# $cmd_num. BIND DATABASE TO LOCALHOST ONLY"
+        if [ -f /etc/mysql/mysql.conf.d/mysqld.cnf ]; then
+          echo "echo 'bind-address = 127.0.0.1' | sudo tee -a /etc/mysql/mysql.conf.d/mysqld.cnf"
+        elif [ -f /etc/mysql/mariadb.conf.d/50-server.cnf ]; then
+          echo "echo 'bind-address = 127.0.0.1' | sudo tee -a /etc/mysql/mariadb.conf.d/50-server.cnf"
+        elif [ -f /opt/bitnami/mariadb/conf/my.cnf ]; then
+          echo "echo 'bind-address = 127.0.0.1' | sudo tee -a /opt/bitnami/mariadb/conf/my.cnf"
+        fi
+        echo "sudo systemctl restart $MYSQL_SERVICE"
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 9. CHANGE SSH PORT
+      if [[ "$ISSUES_STR" == *"SSH on default port 22"* ]]; then
+        echo "# $cmd_num. CHANGE SSH PORT (optional — from 22 to 2222)"
+        echo "sudo sed -i 's/^#Port 22/Port 2222/' /etc/ssh/sshd_config"
+        echo "sudo sshd -t && sudo systemctl restart ssh"
+        echo "sudo ufw allow 2222/tcp && sudo ufw delete allow 22/tcp"
+        echo "# Note: You'll need to use: ssh -p 2222 user@host"
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 10. SET APACHE SERVERTOKENS
+      if [[ "$ISSUES_STR" == *"ServerTokens not set"* ]]; then
+        echo "# $cmd_num. SET APACHE SERVERTOKENS (hide version)"
+        echo "echo 'ServerTokens Prod' | sudo tee -a /opt/bitnami/apache/conf/httpd.conf"
+        echo "echo 'ServerSignature Off' | sudo tee -a /opt/bitnami/apache/conf/httpd.conf"
+        echo "sudo /opt/bitnami/apache/bin/apachectl -t && sudo systemctl restart apache2"
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 11. VERIFY FIXES
+      echo "# $cmd_num. VERIFY FIXES (run audit again)"
       echo "sudo bash security_audit.sh"
       echo ""
       ;;
@@ -587,7 +642,7 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       command -v mariadb &>/dev/null && MYSQL_SERVICE="mariadb"
 
       # Fix 1: Update packages (detect package manager)
-      if grep -q "WARN.*packages upgradable\|FAIL.*packages" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"packages upgradable"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Updating system packages..."
         if command -v apt &>/dev/null; then
           if sudo apt-get update -qq 2>/dev/null && sudo apt-get upgrade -y -qq 2>/dev/null; then
@@ -606,7 +661,7 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       fi
 
       # Fix 2: Enable PasswordAuthentication
-      if grep -q "PasswordAuthentication not explicitly set" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"PasswordAuthentication not explicitly set"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Setting PasswordAuthentication to 'no'..."
         if ! grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config; then
           echo "PasswordAuthentication no" | sudo tee -a /etc/ssh/sshd_config > /dev/null
@@ -620,14 +675,14 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       fi
 
       # Fix 3: Enable UFW (if available)
-      if grep -q "UFW installed but INACTIVE" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"UFW installed but INACTIVE"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Enabling UFW firewall..."
         sudo ufw enable -y > /dev/null 2>&1
         echo "✓ UFW firewall enabled"
       fi
 
       # Fix 4: Install fail2ban (compatible with apt/yum)
-      if grep -q "Fail2ban not installed" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"Fail2ban not installed"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Installing fail2ban..."
         if command -v apt &>/dev/null; then
           sudo apt-get install fail2ban -y -qq 2>/dev/null
@@ -644,7 +699,7 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       fi
 
       # Fix 5: Enable auto-updates (detect distro)
-      if grep -q "unattended-upgrades not installed\|yum-cron" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"unattended-upgrades not installed"* ]] || [[ "$ISSUES_STR" == *"yum-cron"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Installing automatic security updates..."
         if command -v apt &>/dev/null; then
           sudo apt-get install unattended-upgrades -y -qq
@@ -657,14 +712,14 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       fi
 
       # Fix 6: Fix /etc/shadow permissions
-      if grep -q "/etc/shadow.*should be 640" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"/etc/shadow"* ]] && [[ "$ISSUES_STR" == *"640"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Fixing /etc/shadow permissions..."
         sudo chmod 640 /etc/shadow
         echo "✓ /etc/shadow permissions fixed"
       fi
 
       # Fix 7: Fix wp-config.php permissions (CRITICAL)
-      if grep -q "wp-config.php permissions.*DANGER\|DANGER.*contains DB password" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"wp-config.php"* ]] && [[ "$ISSUES_STR" == *"DANGER"* ]]; then
         echo -e "\n${RED}[CRITICAL FIX]${NC}  Securing wp-config.php..."
         WP_CONFIGS=$(find /var/www /bitnami /opt/bitnami /home /srv -name "wp-config.php" -not -path "*/wp-config-sample.php" 2>/dev/null)
         if [ -n "$WP_CONFIGS" ]; then
@@ -676,7 +731,7 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
       fi
 
       # Fix 8: Bind MySQL to localhost (all distros/setups)
-      if grep -q "MySQL bound to 0.0.0.0\|EXPOSED TO INTERNET" <<< "${ISSUES[*]}"; then
+      if [[ "$ISSUES_STR" == *"MySQL bound to 0.0.0.0"* ]] || [[ "$ISSUES_STR" == *"EXPOSED TO INTERNET"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Binding MySQL to localhost only..."
         if [ -f /etc/mysql/mysql.conf.d/mysqld.cnf ] && ! grep -q "bind-address = 127.0.0.1" /etc/mysql/mysql.conf.d/mysqld.cnf; then
           echo "bind-address = 127.0.0.1" | sudo tee -a /etc/mysql/mysql.conf.d/mysqld.cnf > /dev/null
