@@ -210,6 +210,12 @@ if [ -z "$WP_PATHS" ]; then
 else
   for WP_CONFIG in $WP_PATHS; do
     WP_DIR=$(dirname "$WP_CONFIG")
+
+    # Verify this is actually a WordPress root (has wp-content, wp-admin, wp-includes)
+    if [ ! -d "$WP_DIR/wp-content" ] || [ ! -d "$WP_DIR/wp-admin" ] || [ ! -d "$WP_DIR/wp-includes" ]; then
+      continue  # Skip if not a complete WordPress installation
+    fi
+
     info "WordPress install: $WP_DIR"
 
     # wp-config.php permissions
