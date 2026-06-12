@@ -28,11 +28,25 @@ C2_PATTERN="zvo4\.xyz|zvo1\.xyz|icw7\.com|45\.11\.57\.159"
 # PHP execution patterns that don't belong in DB content
 EXEC_PATTERN="eval\\\(|base64_decode\\\(|system\\\(|exec\\\(|shell_exec\\\(|passthru\\\(|assert\\\("
 
-# Injection patterns
+# Injection patterns — iframes and scripts from unknown sources only
+# Note: legitimate iframes (YouTube, Vimeo, Google Maps, WordPress oEmbed) are
+# whitelisted below at query time to avoid false positives
 INJECT_PATTERN="<script[^>]*src=|<iframe[^>]*src=|document\.write\\\(|\.onion|\.php\?cmd="
 
 # Obfuscation patterns
 OBFUS_PATTERN="str_rot13|gzinflate|gzuncompress|str_replace.*base64|preg_replace.*\/e"
+
+# ── Whitelist patterns (legitimate content to exclude from results) ────────────
+# oEmbed meta keys — WordPress caches embedded content in postmeta, all legitimate
+OEMBED_META_KEY="_oembed_"
+
+# Legitimate iframe sources — YouTube, Vimeo, Google Maps, WordPress embeds,
+# SoundCloud, and standard oEmbed providers
+SAFE_IFRAME_SOURCES="youtube\.com|youtu\.be|vimeo\.com|maps\.google\.com|google\.com/maps|wordpress\.org|soundcloud\.com|w\.soundcloud\.com|player\.vimeo\.com|spotify\.com|wistia\.com|loom\.com"
+
+# oEmbed cache post type — WordPress stores embed previews as posts of this type
+# These will always contain iframes and are 100% legitimate
+OEMBED_POST_TYPE="oembed_cache"
 
 TOTAL_SITES=0
 CLEAN_SITES=0
@@ -93,9 +107,14 @@ while IFS= read -r config; do
   fi
 
   # ── Check 2: Options table — injected scripts/code ─────────────────────────
+  # Excludes: transient/feed caches, oEmbed caches, minified CSS/JS stored by
+  # plugins (nfd_utilities, etc.), and legitimate iframe sources
   result=$(wp --path="$site_dir" db query \
     "SELECT option_name, LEFT(option_value,300) FROM ${prefix}options
      WHERE option_value REGEXP '${C2_PATTERN}|${INJECT_PATTERN}|${OBFUS_PATTERN}'
+     AND option_name NOT REGEXP '^_transient_|^_site_transient_'
+     AND option_value NOT REGEXP '${SAFE_IFRAME_SOURCES}'
+     AND option_name NOT IN ('nfd_utilities_css','nfd_utilities_js')
      LIMIT 20;" 2>/dev/null || echo "")
 
   if [[ -n "$result" && "$result" != *"0 rows"* ]]; then
@@ -107,11 +126,15 @@ while IFS= read -r config; do
   fi
 
   # ── Check 3: Post content — injected scripts ────────────────────────────────
+  # Excludes: oembed_cache post type (WP stores embed previews here, always has
+  # iframes), and iframes from known-safe sources (YouTube, Vimeo, Maps, etc.)
   result=$(wp --path="$site_dir" db query \
     "SELECT ID, post_title, post_type, post_status, LEFT(post_content,200)
      FROM ${prefix}posts
      WHERE post_content REGEXP '${C2_PATTERN}|${INJECT_PATTERN}|${EXEC_PATTERN}'
      AND post_status != 'auto-draft'
+     AND post_type != 'oembed_cache'
+     AND post_content NOT REGEXP '${SAFE_IFRAME_SOURCES}'
      LIMIT 20;" 2>/dev/null || echo "")
 
   if [[ -n "$result" && "$result" != *"0 rows"* ]]; then
@@ -123,10 +146,16 @@ while IFS= read -r config; do
   fi
 
   # ── Check 4: Postmeta — injected payloads ──────────────────────────────────
+  # Excludes: _oembed_* keys (WP caches oEmbed HTML here, always has iframes),
+  # _elementor_element_cache (Elementor render cache, contains full HTML),
+  # and postmeta values containing only safe iframe sources
   result=$(wp --path="$site_dir" db query \
     "SELECT post_id, meta_key, LEFT(meta_value,200)
      FROM ${prefix}postmeta
      WHERE meta_value REGEXP '${C2_PATTERN}|${INJECT_PATTERN}'
+     AND meta_key NOT LIKE '_oembed_%'
+     AND meta_key NOT IN ('_elementor_element_cache','_elementor_data')
+     AND meta_value NOT REGEXP '${SAFE_IFRAME_SOURCES}'
      LIMIT 20;" 2>/dev/null || echo "")
 
   if [[ -n "$result" && "$result" != *"0 rows"* ]]; then
@@ -142,6 +171,7 @@ while IFS= read -r config; do
     "SELECT user_id, meta_key, LEFT(meta_value,200)
      FROM ${prefix}usermeta
      WHERE meta_value REGEXP '${C2_PATTERN}|${INJECT_PATTERN}'
+     AND meta_value NOT REGEXP '${SAFE_IFRAME_SOURCES}'
      LIMIT 20;" 2>/dev/null || echo "")
 
   if [[ -n "$result" && "$result" != *"0 rows"* ]]; then
