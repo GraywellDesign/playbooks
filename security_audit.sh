@@ -619,7 +619,49 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         ((cmd_num++))
       fi
 
-      # 10. SET APACHE SERVERTOKENS
+      # 10. DISABLE WP_DEBUG
+      if [[ "$ISSUES_STR" == *"WP_DEBUG is enabled"* ]]; then
+        echo "# $cmd_num. DISABLE WP_DEBUG IN WORDPRESS"
+        echo "# Find all WordPress installs and disable WP_DEBUG:"
+        echo "find /var/www /bitnami /opt/bitnami /home /srv -name 'wp-config.php' -not -path '*/wp-config-sample.php' 2>/dev/null | while read f; do"
+        echo "  sudo sed -i \"s/define('WP_DEBUG', true);/define('WP_DEBUG', false);/g\" \"\$f\""
+        echo "  sudo sed -i \"s/define( 'WP_DEBUG', true );/define( 'WP_DEBUG', false );/g\" \"\$f\""
+        echo "done"
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 11. DISABLE XMLRPC.PHP
+      if [[ "$ISSUES_STR" == *"xmlrpc.php exists"* ]]; then
+        echo "# $cmd_num. DISABLE XMLRPC.PHP VIA .HTACCESS"
+        echo "# Add this to .htaccess in each WordPress root:"
+        echo 'cat >> /var/www/html/.htaccess <<'"'"'EOF'"'"''
+        echo '# Block xmlrpc.php (security risk)'
+        echo '<FilesMatch "xmlrpc\.php">'
+        echo '  <IfModule mod_authz_core.c>'
+        echo '    Require all denied'
+        echo '  </IfModule>'
+        echo '  <IfModule !mod_authz_core.c>'
+        echo '    Order Allow,Deny'
+        echo '    Deny from all'
+        echo '  </IfModule>'
+        echo '</FilesMatch>'
+        echo 'EOF'
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 12. RENEW SSL CERTIFICATE
+      if [[ "$ISSUES_STR" == *"SSL cert"* ]] && [[ "$ISSUES_STR" == *"expires in"* ]]; then
+        echo "# $cmd_num. RENEW SSL CERTIFICATE (Let's Encrypt)"
+        echo "sudo certbot renew --non-interactive"
+        echo "# Or manually:"
+        echo "sudo certbot certonly --apache -d yourdomain.com"
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # SET APACHE SERVERTOKENS
       if [[ "$ISSUES_STR" == *"ServerTokens not set"* ]]; then
         echo "# $cmd_num. SET APACHE SERVERTOKENS (hide version)"
         echo "echo 'ServerTokens Prod' | sudo tee -a /opt/bitnami/apache/conf/httpd.conf"
@@ -629,7 +671,7 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         ((cmd_num++))
       fi
 
-      # 11. VERIFY FIXES
+      # VERIFY FIXES
       echo "# $cmd_num. VERIFY FIXES (run audit again)"
       echo "sudo bash security_audit.sh"
       echo ""
@@ -742,6 +784,74 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         fi
         sudo systemctl restart $MYSQL_SERVICE 2>/dev/null
         echo "✓ MySQL bound to localhost only"
+      fi
+
+      # Fix 9: Disable WP_DEBUG in wp-config.php
+      if [[ "$ISSUES_STR" == *"WP_DEBUG is enabled"* ]]; then
+        echo -e "\n${GRN}[APPLY]${NC}  Disabling WP_DEBUG in wp-config.php..."
+        WP_CONFIGS=$(find /var/www /bitnami /opt/bitnami /home /srv -name "wp-config.php" -not -path "*/wp-config-sample.php" 2>/dev/null)
+        if [ -n "$WP_CONFIGS" ]; then
+          while IFS= read -r wpconfig; do
+            if grep -q "define.*WP_DEBUG.*true" "$wpconfig" 2>/dev/null; then
+              sudo sed -i "s/define('WP_DEBUG', true);/define('WP_DEBUG', false);/g" "$wpconfig"
+              sudo sed -i "s/define( 'WP_DEBUG', true );/define( 'WP_DEBUG', false );/g" "$wpconfig"
+              echo "✓ Fixed: $wpconfig (WP_DEBUG disabled)"
+            fi
+          done <<< "$WP_CONFIGS"
+        fi
+      fi
+
+      # Fix 10: Disable xmlrpc.php via .htaccess
+      if [[ "$ISSUES_STR" == *"xmlrpc.php exists"* ]]; then
+        echo -e "\n${GRN}[APPLY]${NC}  Blocking xmlrpc.php via .htaccess..."
+        WP_DIRS=$(find /var/www /bitnami /opt/bitnami /home /srv -name "wp-config.php" -not -path "*/wp-config-sample.php" 2>/dev/null | xargs dirname)
+        if [ -n "$WP_DIRS" ]; then
+          while IFS= read -r wpdir; do
+            HTACCESS="$wpdir/.htaccess"
+            if [ -f "$HTACCESS" ] && ! grep -q "xmlrpc.php" "$HTACCESS"; then
+              echo -e "\n# Block xmlrpc.php (security risk)" | sudo tee -a "$HTACCESS" > /dev/null
+              echo '<FilesMatch "xmlrpc\.php">' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '  <IfModule mod_authz_core.c>' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '    Require all denied' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '  </IfModule>' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '  <IfModule !mod_authz_core.c>' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '    Order Allow,Deny' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '    Deny from all' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '  </IfModule>' | sudo tee -a "$HTACCESS" > /dev/null
+              echo '</FilesMatch>' | sudo tee -a "$HTACCESS" > /dev/null
+              echo "✓ Fixed: $wpdir/.htaccess (xmlrpc.php blocked)"
+            fi
+          done <<< "$WP_DIRS"
+        fi
+      fi
+
+      # Fix 11: Renew SSL certificate
+      if [[ "$ISSUES_STR" == *"SSL cert"* ]] && [[ "$ISSUES_STR" == *"expires in"* ]]; then
+        echo -e "\n${GRN}[APPLY]${NC}  Renewing SSL certificate..."
+        if command -v certbot &>/dev/null; then
+          if sudo certbot renew --non-interactive 2>/dev/null; then
+            echo "✓ SSL certificate renewed (certbot)"
+          else
+            echo "${YEL}⚠ Certbot renewal attempted but check status:${NC}"
+            echo "  sudo certbot certificates"
+          fi
+        else
+          echo "${YEL}⚠ Certbot not found — cannot auto-renew${NC}"
+          echo "  Install with: sudo apt-get install certbot -y"
+        fi
+      fi
+
+      # Fix 12: Investigate port 6379 (Redis)
+      if [[ "$ISSUES_STR" == *"6379"* ]]; then
+        echo -e "\n${BLU}[INFO]${NC}  Port 6379 detected (Redis cache server)..."
+        REDIS_PROC=$(ps aux | grep -i redis | grep -v grep)
+        if [ -n "$REDIS_PROC" ]; then
+          echo "✓ Redis is running (likely for WordPress caching — this is OK if intentional)"
+          echo "  To disable Redis, run: sudo systemctl stop redis-server && sudo systemctl disable redis-server"
+          echo "  To verify it's being used: grep -r 6379 /var/www /bitnami /opt/bitnami 2>/dev/null | head -5"
+        else
+          echo "  Redis process not found but port is listening — may be Docker/external"
+        fi
       fi
 
       echo -e "\n${GRN}✓ All available auto-fixes applied!${NC}"
