@@ -100,11 +100,25 @@ else
 fi
 
 # AWS or DigitalOcean?
+# Use IMDSv2 token for AWS (Lightsail supports it; IMDSv1 may be disabled)
 PLATFORM="unknown"
-if curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/instance-id &>/dev/null; then
+AWS_TOKEN=$(curl -sf --max-time 3 -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 10" 2>/dev/null || echo "")
+if [ -n "$AWS_TOKEN" ]; then
+  INSTANCE_ID=$(curl -sf --max-time 3 \
+    -H "X-aws-ec2-metadata-token: $AWS_TOKEN" \
+    http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+fi
+# Fall back to IMDSv1 if token request failed (some Lightsail configs still allow it)
+if [ -z "${INSTANCE_ID:-}" ]; then
+  INSTANCE_ID=$(curl -sf --max-time 3 \
+    http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+fi
+
+if [ -n "${INSTANCE_ID:-}" ]; then
   PLATFORM="aws"
-  info "Platform: AWS (EC2/Lightsail)"
-elif curl -sf --max-time 2 http://169.254.169.254/metadata/v1/id &>/dev/null; then
+  info "Platform: AWS (EC2/Lightsail) — instance $INSTANCE_ID"
+elif curl -sf --max-time 3 http://169.254.169.254/metadata/v1/id &>/dev/null; then
   PLATFORM="digitalocean"
   info "Platform: DigitalOcean"
 else
@@ -535,15 +549,30 @@ EOF
       PASS_PATTERN="unknown"
       CREDENTIALS_LOG=""
 
-      if grep -q "shell_exec" "$WP_CFG" 2>/dev/null; then
-        # Lightsail pattern: password read from an external file via shell_exec
-        # Extract the file path from: shell_exec('tail -n 1 /path/to/credentials.log')
-        CREDENTIALS_LOG=$(grep "shell_exec" "$WP_CFG" | grep -oP "(?<=tail -n 1 )[^'\")]+" | head -1)
+      if grep -q "shell_exec\|credentials" "$WP_CFG" 2>/dev/null; then
+        # Lightsail pattern — password comes from an external file, referenced in one of two ways:
+        #   Style A (older): shell_exec('tail -n 1 /opt/aws/wordpress/credentials.log')
+        #   Style B (newer): $cmd = 'tail -n 1 /opt/aws/wordpress/credentials.log';
+        #                    $db_password = shell_exec($cmd);
+        # Grab the path from whichever line contains 'tail -n 1 /...'
+        CREDENTIALS_LOG=$(grep -oP "(?<=tail -n 1 )[^\s'\"\\\\)]+" "$WP_CFG" 2>/dev/null | head -1)
+
+        # If not found via tail, try any quoted absolute path ending in .log near shell_exec
+        if [ -z "$CREDENTIALS_LOG" ]; then
+          CREDENTIALS_LOG=$(grep -A2 -B2 "shell_exec\|DB_PASSWORD" "$WP_CFG" \
+            | grep -oP "(?<=['\"'])/[^'\"]+\.log" | head -1)
+        fi
+
         if [ -n "$CREDENTIALS_LOG" ] && [ -f "$CREDENTIALS_LOG" ]; then
           PASS_PATTERN="lightsail_credentials_log"
           info "  Password pattern: Lightsail credentials.log ($CREDENTIALS_LOG)"
+        elif [ -n "$CREDENTIALS_LOG" ]; then
+          warn "  Credentials file referenced but not found: '$CREDENTIALS_LOG'"
+          warn "  Creating it with a new password so WordPress can connect"
+          mkdir -p "$(dirname "$CREDENTIALS_LOG")"
+          PASS_PATTERN="lightsail_credentials_log"
         else
-          warn "  shell_exec detected but credentials file not found: '${CREDENTIALS_LOG:-unknown}'"
+          warn "  shell_exec/credentials detected but could not extract file path from $WP_CFG"
           PASS_PATTERN="unknown"
         fi
       elif grep -q "DB_PASSWORD" "$WP_CFG" 2>/dev/null \
@@ -624,14 +653,24 @@ fi
 section "7. Web Server Hardening"
 
 restart_webserver() {
+  local svc="$1"
   if $IS_BITNAMI; then
-    /opt/bitnami/ctlscript.sh restart "$1" &>/dev/null \
-      && fixed "$1 restarted (Bitnami)" \
-      || warn "$1 restart failed — check manually"
+    /opt/bitnami/ctlscript.sh restart "$svc" &>/dev/null \
+      && fixed "$svc restarted (Bitnami)" \
+      || warn "$svc restart failed — check manually"
   else
-    systemctl restart "$1" 2>/dev/null \
-      && fixed "$1 restarted" \
-      || warn "$1 restart failed — check manually"
+    # Resolve the actual systemd service name — Debian/Ubuntu use apache2, RHEL uses httpd
+    local resolved_svc="$svc"
+    if [ "$svc" = "apache" ]; then
+      if systemctl list-units --type=service 2>/dev/null | grep -q "apache2.service"; then
+        resolved_svc="apache2"
+      elif systemctl list-units --type=service 2>/dev/null | grep -q "httpd.service"; then
+        resolved_svc="httpd"
+      fi
+    fi
+    systemctl restart "$resolved_svc" 2>/dev/null \
+      && fixed "$resolved_svc restarted" \
+      || warn "$resolved_svc restart failed — check: systemctl status $resolved_svc"
   fi
 }
 
@@ -764,8 +803,31 @@ else
       fi
     fi
 
-    # .htaccess exists
-    [ -f "$WP_DIR/.htaccess" ] && ok ".htaccess present" || warn "No .htaccess in $WP_DIR"
+    # .htaccess — create standard WordPress one if missing
+    if [ -f "$WP_DIR/.htaccess" ]; then
+      ok ".htaccess present in $WP_DIR"
+    else
+      warn "No .htaccess in $WP_DIR — creating standard WordPress .htaccess"
+      cat > "$WP_DIR/.htaccess" <<'HTACCESS'
+# BEGIN WordPress
+# The directives (lines) between "BEGIN WordPress" and "END WordPress" are
+# dynamically generated, and should only be modified via WordPress filters.
+# Any changes to the directives between these markers will be overwritten.
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
+</IfModule>
+# END WordPress
+HTACCESS
+      chown "$(stat -c '%U:%G' "$WP_DIR/wp-config.php" 2>/dev/null || echo 'www-data:www-data')" "$WP_DIR/.htaccess"
+      chmod 644 "$WP_DIR/.htaccess"
+      fixed ".htaccess created in $WP_DIR"
+    fi
 
   done
 fi
