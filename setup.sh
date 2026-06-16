@@ -554,21 +554,25 @@ EOF
         #   Style A (older): shell_exec('tail -n 1 /opt/aws/wordpress/credentials.log')
         #   Style B (newer): $cmd = 'tail -n 1 /opt/aws/wordpress/credentials.log';
         #                    $db_password = shell_exec($cmd);
-        # Grab the path from whichever line contains 'tail -n 1 /...'
-        CREDENTIALS_LOG=$(grep -oP "(?<=tail -n 1 )[^\s'\"\\\\)]+" "$WP_CFG" 2>/dev/null | head -1)
+        # Grab the path from the line containing 'tail -n 1 /...'
+        # Use tr -d to strip any trailing newline/whitespace that grep -oP can capture
+        CREDENTIALS_LOG=$(grep -oP "(?<=tail -n 1 )[^\s'\"\\\\);]+" "$WP_CFG" 2>/dev/null \
+          | head -1 | tr -d '[:space:]')
 
-        # If not found via tail, try any quoted absolute path ending in .log near shell_exec
+        # Fallback: any quoted absolute path ending in .log anywhere near shell_exec
         if [ -z "$CREDENTIALS_LOG" ]; then
           CREDENTIALS_LOG=$(grep -A2 -B2 "shell_exec\|DB_PASSWORD" "$WP_CFG" \
-            | grep -oP "(?<=['\"'])/[^'\"]+\.log" | head -1)
+            | grep -oP "/[^\s'\"]+\.log" | head -1 | tr -d '[:space:]')
         fi
+
+        # Debug: log exactly what we extracted so future failures are diagnosable
+        info "  Extracted credentials path: '${CREDENTIALS_LOG}'"
 
         if [ -n "$CREDENTIALS_LOG" ] && [ -f "$CREDENTIALS_LOG" ]; then
           PASS_PATTERN="lightsail_credentials_log"
           info "  Password pattern: Lightsail credentials.log ($CREDENTIALS_LOG)"
         elif [ -n "$CREDENTIALS_LOG" ]; then
-          warn "  Credentials file referenced but not found: '$CREDENTIALS_LOG'"
-          warn "  Creating it with a new password so WordPress can connect"
+          warn "  Credentials file referenced but not found: '$CREDENTIALS_LOG' — creating it"
           mkdir -p "$(dirname "$CREDENTIALS_LOG")"
           PASS_PATTERN="lightsail_credentials_log"
         else
