@@ -90,9 +90,11 @@ IS_BITNAMI=false
 BITNAMI_WP_DIR=""
 if [ -d "/opt/bitnami" ] || [ -d "/bitnami" ]; then
   IS_BITNAMI=true
-  BITNAMI_WP_DIR=$(find /opt/bitnami -name "wp-config.php" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "")
+  # Search both Bitnami paths — Lightsail uses /bitnami/wordpress, standard uses /opt/bitnami
+  BITNAMI_WP_DIR=$(find /opt/bitnami /bitnami -name "wp-config.php" 2>/dev/null \
+    | grep -v "wp-config-sample.php" | head -1 | xargs dirname 2>/dev/null || echo "")
   info "Bitnami stack detected"
-  [ -n "$BITNAMI_WP_DIR" ] && info "WordPress found at: $BITNAMI_WP_DIR" || warn "WordPress not found in Bitnami path"
+  [ -n "$BITNAMI_WP_DIR" ] && info "WordPress found at: $BITNAMI_WP_DIR" || warn "WordPress not found in Bitnami paths (/opt/bitnami, /bitnami)"
 else
   info "Bare Ubuntu server detected"
 fi
@@ -416,13 +418,6 @@ section "6. MySQL / MariaDB Security"
 
 if command -v mysql &>/dev/null || command -v mysqld &>/dev/null; then
   # Check bind address
-  MY_BIND=$(grep -E "^bind-address" \
-    /etc/mysql/mysql.conf.d/mysqld.cnf \
-    /etc/mysql/my.cnf \
-    /etc/my.cnf \
-    /opt/bitnami/mariadb/conf/my.cnf \
-    2>/dev/null | head -1 | awk -F= '{print $2}' | tr -d ' ')
-
   if ss -tlnp 2>/dev/null | grep -E "0\.0\.0\.0:3306|\*:3306" | grep -q .; then
     bad "MySQL/MariaDB is bound to 0.0.0.0 — externally accessible!"
     warn "Manually add 'bind-address = 127.0.0.1' to your MySQL config and restart"
@@ -430,28 +425,55 @@ if command -v mysql &>/dev/null || command -v mysqld &>/dev/null; then
     ok "MySQL/MariaDB is locally bound only"
   fi
 
-  # Set root password if provided and MySQL currently has no password
-  if [ -n "${MYSQL_ROOT_PASS:-}" ]; then
-    if mysql -u root --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
-      # No password set — set it now
-      mysql -u root --connect-timeout=3 \
-        -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASS}'; FLUSH PRIVILEGES;" \
-        2>/dev/null \
-        && fixed "MySQL root password set" \
-        || {
-          # Try MariaDB syntax as fallback
-          mysql -u root --connect-timeout=3 \
-            -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${MYSQL_ROOT_PASS}'); FLUSH PRIVILEGES;" \
-            2>/dev/null \
-            && fixed "MySQL root password set (MariaDB)" \
-            || bad "Could not set MySQL root password — set manually"
-        }
+  # ── Detect how root currently authenticates ──────────────────
+  # Lightsail/Bitnami MariaDB typically uses unix_socket auth for root —
+  # connecting via sudo mysql (no password) is the expected pattern.
+  MYSQL_ROOT_CMD=""
+  if mysql -u root --connect-timeout=3 --password="" -e "SELECT 1" 2>/dev/null | grep -q 1; then
+    MYSQL_ROOT_CMD="mysql -u root --password=''"
+    info "MySQL root: no-password access (socket or empty password)"
+  elif sudo mysql --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
+    MYSQL_ROOT_CMD="sudo mysql"
+    info "MySQL root: unix_socket auth via sudo (Lightsail/Bitnami default)"
+  elif [ -f /root/.my.cnf ] && mysql --defaults-file=/root/.my.cnf --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
+    MYSQL_ROOT_CMD="mysql --defaults-file=/root/.my.cnf"
+    info "MySQL root: credentials from /root/.my.cnf"
+  else
+    bad "Cannot connect to MySQL as root — skipping DB steps"
+  fi
+
+  # ── Set root password if provided ────────────────────────────
+  if [ -n "${MYSQL_ROOT_PASS:-}" ] && [ -n "$MYSQL_ROOT_CMD" ]; then
+    # Check if root is currently passwordless / socket-auth
+    if mysql -u root --connect-timeout=3 --password="" -e "SELECT 1" 2>/dev/null | grep -q 1 \
+       || sudo mysql --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
+
+      # Try ALTER USER (MySQL 5.7+ / MariaDB 10.4+)
+      SET_OK=false
+      $MYSQL_ROOT_CMD -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASS}'; FLUSH PRIVILEGES;" 2>/dev/null \
+        && SET_OK=true
+
+      # Fallback: MariaDB older syntax
+      if ! $SET_OK; then
+        $MYSQL_ROOT_CMD -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${MYSQL_ROOT_PASS}'); FLUSH PRIVILEGES;" 2>/dev/null \
+          && SET_OK=true
+      fi
+
+      # Fallback: mysqladmin
+      if ! $SET_OK; then
+        mysqladmin -u root password "${MYSQL_ROOT_PASS}" 2>/dev/null && SET_OK=true
+      fi
+
+      $SET_OK && fixed "MySQL root password set" || bad "Could not set MySQL root password — set manually with: ALTER USER 'root'@'localhost' IDENTIFIED BY 'newpass';"
+
+      # Update MYSQL_ROOT_CMD now that password is set
+      MYSQL_ROOT_CMD="mysql -u root -p'${MYSQL_ROOT_PASS}'"
     else
       ok "MySQL root already has a password — skipping"
     fi
   fi
 
-  # Write /root/.my.cnf so root can connect without typing password
+  # ── Write /root/.my.cnf ───────────────────────────────────────
   if [ -n "${MYSQL_ROOT_PASS:-}" ]; then
     cat > /root/.my.cnf <<EOF
 [client]
@@ -459,6 +481,7 @@ user=root
 password=${MYSQL_ROOT_PASS}
 EOF
     chmod 600 /root/.my.cnf
+    MYSQL_ROOT_CMD="mysql --defaults-file=/root/.my.cnf"
     fixed "MySQL credentials saved to /root/.my.cnf"
   elif [ -f /root/.my.cnf ]; then
     ok "/root/.my.cnf already exists"
@@ -466,12 +489,131 @@ EOF
     warn "No MySQL root password provided — watchdog MySQL check may fail if password is set"
   fi
 
-  # Verify connectivity
-  if mysql -u root --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
+  # ── Verify connectivity ───────────────────────────────────────
+  if [ -n "$MYSQL_ROOT_CMD" ] && $MYSQL_ROOT_CMD --connect-timeout=3 -e "SELECT 1" 2>/dev/null | grep -q 1; then
     ok "MySQL root authentication working"
   else
     bad "MySQL root not accessible — run mysql_secure_installation manually"
   fi
+
+  # ── Harden WordPress DB users ────────────────────────────────
+  # Supports three wp-config.php password patterns:
+  #
+  #   A) Standard:   define( 'DB_PASSWORD', 'somepassword' );
+  #   B) Lightsail:  $db_password = shell_exec('tail -n 1 /opt/aws/wordpress/credentials.log');
+  #                  define( 'DB_PASSWORD', $db_password );
+  #   C) Other external file/env patterns (falls through to manual warning)
+  #
+  # Strategy for all cases:
+  #   1. Read DB_NAME and DB_USER from wp-config.php
+  #   2. Detect which password pattern is in use
+  #   3. Generate a new strong password
+  #   4. ALTER USER in MySQL (source of truth)
+  #   5. Write new password to the correct location (wp-config.php or credentials.log)
+  #   6. Verify the connection works
+
+  # Smart wp-config.php finder — searches all known locations including Lightsail's /var/www/html
+  WP_CONFIGS_FOR_DB=$(find \
+    /bitnami /opt/bitnami /var/www /srv /home \
+    -name "wp-config.php" -not -path "*/wp-config-sample.php" \
+    2>/dev/null || true)
+
+  if [ -n "$WP_CONFIGS_FOR_DB" ] && [ -n "$MYSQL_ROOT_CMD" ]; then
+    for WP_CFG in $WP_CONFIGS_FOR_DB; do
+      WP_DB_NAME=$(grep "DB_NAME" "$WP_CFG" 2>/dev/null | grep -oP "(?<=')[^']+(?=')" | tail -1)
+      WP_DB_USER=$(grep "DB_USER" "$WP_CFG" 2>/dev/null | grep -oP "(?<=')[^']+(?=')" | tail -1)
+
+      if [ -z "$WP_DB_NAME" ] || [ -z "$WP_DB_USER" ]; then
+        warn "Could not parse DB_NAME/DB_USER from $WP_CFG — skipping"
+        continue
+      fi
+
+      info "WordPress install: $WP_CFG"
+      info "  DB_NAME=$WP_DB_NAME  DB_USER=$WP_DB_USER"
+
+      # ── Detect password storage pattern ──────────────────────
+      PASS_PATTERN="unknown"
+      CREDENTIALS_LOG=""
+
+      if grep -q "shell_exec" "$WP_CFG" 2>/dev/null; then
+        # Lightsail pattern: password read from an external file via shell_exec
+        # Extract the file path from: shell_exec('tail -n 1 /path/to/credentials.log')
+        CREDENTIALS_LOG=$(grep "shell_exec" "$WP_CFG" | grep -oP "(?<=tail -n 1 )[^'\")]+" | head -1)
+        if [ -n "$CREDENTIALS_LOG" ] && [ -f "$CREDENTIALS_LOG" ]; then
+          PASS_PATTERN="lightsail_credentials_log"
+          info "  Password pattern: Lightsail credentials.log ($CREDENTIALS_LOG)"
+        else
+          warn "  shell_exec detected but credentials file not found: '${CREDENTIALS_LOG:-unknown}'"
+          PASS_PATTERN="unknown"
+        fi
+      elif grep -q "DB_PASSWORD" "$WP_CFG" 2>/dev/null \
+           && grep "DB_PASSWORD" "$WP_CFG" | grep -q "define"; then
+        PASS_PATTERN="standard"
+        info "  Password pattern: standard define('DB_PASSWORD', '...')"
+      fi
+
+      if [ "$PASS_PATTERN" = "unknown" ]; then
+        warn "  Cannot determine password storage pattern for $WP_CFG — skipping DB password rotation"
+        warn "  Manually set password in MySQL and update wp-config.php"
+        continue
+      fi
+
+      # ── Generate new strong password ──────────────────────────
+      # Alphanumeric only — safe in shell, PHP, and MySQL without escaping
+      NEW_WP_DB_PASS=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 32)
+
+      # ── Ensure database exists ────────────────────────────────
+      $MYSQL_ROOT_CMD -e \
+        "CREATE DATABASE IF NOT EXISTS \`${WP_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" \
+        2>/dev/null \
+        && info "  Database '${WP_DB_NAME}' ensured" \
+        || warn "  Could not create database '${WP_DB_NAME}'"
+
+      # ── Rotate MySQL user password (ALTER USER is authoritative) ──
+      $MYSQL_ROOT_CMD -e "
+        DROP USER IF EXISTS '${WP_DB_USER}'@'localhost';
+        CREATE USER '${WP_DB_USER}'@'localhost' IDENTIFIED BY '${NEW_WP_DB_PASS}';
+        GRANT ALL PRIVILEGES ON \`${WP_DB_NAME}\`.* TO '${WP_DB_USER}'@'localhost';
+        FLUSH PRIVILEGES;
+      " 2>/dev/null \
+        && fixed "  MySQL: ALTER USER '${WP_DB_USER}'@'localhost' — password rotated, privileges granted" \
+        || { bad "  Could not update MySQL user '${WP_DB_USER}' — check MySQL logs"; continue; }
+
+      # ── Write new password to the correct location ────────────
+      case "$PASS_PATTERN" in
+
+        lightsail_credentials_log)
+          # Lightsail reads only the LAST line of credentials.log via `tail -n 1`
+          # Append the new password as a new last line — preserves history
+          echo "${NEW_WP_DB_PASS}" >> "$CREDENTIALS_LOG" \
+            && fixed "  New password appended to $CREDENTIALS_LOG (tail -n 1 will pick it up)" \
+            || { bad "  Could not write to $CREDENTIALS_LOG — update manually"; info "  New password: ${NEW_WP_DB_PASS}"; }
+          ;;
+
+        standard)
+          # Replace define( 'DB_PASSWORD', '...' ) — handles varied spacing
+          if sed -i -E "s|define\s*\(\s*'DB_PASSWORD'\s*,\s*'[^']*'\s*\)|define( 'DB_PASSWORD', '${NEW_WP_DB_PASS}' )|g" \
+               "$WP_CFG" 2>/dev/null; then
+            fixed "  wp-config.php DB_PASSWORD updated ($WP_CFG)"
+          else
+            bad "  Could not update DB_PASSWORD in $WP_CFG — update manually"
+            info "  New password: ${NEW_WP_DB_PASS}"
+          fi
+          ;;
+      esac
+
+      # ── Verify end-to-end connection ──────────────────────────
+      if mysql -u "${WP_DB_USER}" -p"${NEW_WP_DB_PASS}" --connect-timeout=3 \
+           -e "USE \`${WP_DB_NAME}\`; SELECT 1;" 2>/dev/null | grep -q 1; then
+        ok "  WordPress DB connection verified: ${WP_DB_USER} → ${WP_DB_NAME}"
+      else
+        bad "  WordPress DB user '${WP_DB_USER}' still cannot connect after rotation"
+        info "  Debug: mysql -u ${WP_DB_USER} -p'${NEW_WP_DB_PASS}' ${WP_DB_NAME}"
+      fi
+
+    done
+  fi
+
 else
   info "MySQL/MariaDB not installed — skipping"
 fi
@@ -557,7 +699,7 @@ fi
 # ──────────────────────────────────────────
 section "8. WordPress Hardening"
 
-# Find all wp-config.php files — covers Lightsail Bitnami, standard Bitnami, bare Ubuntu, cPanel
+# Find all wp-config.php files — covers Lightsail Bitnami (/bitnami), standard Bitnami (/opt/bitnami), bare Ubuntu (/var/www), cPanel
 WP_CONFIGS=$(find \
   /bitnami \
   /opt/bitnami \
@@ -567,6 +709,13 @@ WP_CONFIGS=$(find \
   -name "wp-config.php" \
   -not -path "*/wp-config-sample.php" \
   2>/dev/null || true)
+
+# On Lightsail, wp-config.php is often at /var/www/html/wp-config.php symlinked from /bitnami
+# Also check the actual /bitnami/wordpress path directly
+if [ -z "$WP_CONFIGS" ]; then
+  WP_CONFIGS=$(find /bitnami/wordpress /var/www/html -name "wp-config.php" \
+    -not -path "*/wp-config-sample.php" 2>/dev/null || true)
+fi
 
 if [ -z "$WP_CONFIGS" ]; then
   info "No WordPress installs found — skipping"
