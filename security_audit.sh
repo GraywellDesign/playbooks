@@ -608,7 +608,20 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         ((cmd_num++))
       fi
 
-      # 9. CHANGE SSH PORT
+      # 9. SET MYSQL ROOT PASSWORD
+      if [[ "$ISSUES_STR" == *"MySQL root has NO PASSWORD"* ]]; then
+        echo "# $cmd_num. SET MYSQL ROOT PASSWORD (CRITICAL)"
+        echo "# Generate a strong random password and save it to /root/.my.cnf:"
+        echo "MYSQL_ROOT_PASS=\$(openssl rand -base64 24)"
+        echo "mysql -u root --password='' -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY '\$MYSQL_ROOT_PASS'; FLUSH PRIVILEGES;\""
+        echo "printf '[client]\nuser=root\npassword=%s\n' \"\$MYSQL_ROOT_PASS\" | sudo tee /root/.my.cnf > /dev/null"
+        echo "sudo chmod 600 /root/.my.cnf"
+        echo "echo \"MySQL root password saved to /root/.my.cnf — keep this file safe!\""
+        echo ""
+        ((cmd_num++))
+      fi
+
+      # 10. CHANGE SSH PORT
       if [[ "$ISSUES_STR" == *"SSH on default port 22"* ]]; then
         echo "# $cmd_num. CHANGE SSH PORT (optional — from 22 to 2222)"
         echo "sudo sed -i 's/^#Port 22/Port 2222/' /etc/ssh/sshd_config"
@@ -786,7 +799,28 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         echo "✓ MySQL bound to localhost only"
       fi
 
-      # Fix 9: Disable WP_DEBUG in wp-config.php
+      # Fix 9: Set MySQL root password
+      if [[ "$ISSUES_STR" == *"MySQL root has NO PASSWORD"* ]]; then
+        echo -e "\n${RED}[CRITICAL FIX]${NC}  Setting MySQL root password..."
+        MYSQL_ROOT_PASS=$(openssl rand -base64 24)
+        if mysql -u root --password="" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASS'; FLUSH PRIVILEGES;" 2>/dev/null; then
+          printf '[client]\nuser=root\npassword=%s\n' "$MYSQL_ROOT_PASS" | sudo tee /root/.my.cnf > /dev/null
+          sudo chmod 600 /root/.my.cnf
+          echo "✓ MySQL root password set and saved to /root/.my.cnf"
+        else
+          # Fallback: try mysqladmin
+          if sudo mysqladmin -u root password "$MYSQL_ROOT_PASS" 2>/dev/null; then
+            printf '[client]\nuser=root\npassword=%s\n' "$MYSQL_ROOT_PASS" | sudo tee /root/.my.cnf > /dev/null
+            sudo chmod 600 /root/.my.cnf
+            echo "✓ MySQL root password set and saved to /root/.my.cnf"
+          else
+            echo "${YEL}⚠ Could not set MySQL root password automatically${NC}"
+            echo "  Run manually: mysql -u root --password='' -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY 'YOURPASSWORD'; FLUSH PRIVILEGES;\""
+          fi
+        fi
+      fi
+
+      # Fix 11: Disable WP_DEBUG in wp-config.php
       if [[ "$ISSUES_STR" == *"WP_DEBUG is enabled"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Disabling WP_DEBUG in wp-config.php..."
         WP_CONFIGS=$(find /var/www /bitnami /opt/bitnami /home /srv -name "wp-config.php" -not -path "*/wp-config-sample.php" 2>/dev/null)
@@ -825,7 +859,7 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         fi
       fi
 
-      # Fix 11: Renew SSL certificate
+      # Fix 12: Renew SSL certificate
       if [[ "$ISSUES_STR" == *"SSL cert"* ]] && [[ "$ISSUES_STR" == *"expires in"* ]]; then
         echo -e "\n${GRN}[APPLY]${NC}  Renewing SSL certificate..."
         if command -v certbot &>/dev/null; then
@@ -841,7 +875,7 @@ if [ ${#ISSUES[@]} -gt 0 ]; then
         fi
       fi
 
-      # Fix 12: Investigate port 6379 (Redis)
+      # Fix 13: Investigate port 6379 (Redis)
       if [[ "$ISSUES_STR" == *"6379"* ]]; then
         echo -e "\n${BLU}[INFO]${NC}  Port 6379 detected (Redis cache server)..."
         REDIS_PROC=$(ps aux | grep -i redis | grep -v grep)
