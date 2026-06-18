@@ -27,7 +27,23 @@ ts()     { date '+%Y-%m-%d %H:%M:%S'; }
 log()    { echo "$(ts) $*" | tee -a "$LOG"; }
 log_ok() { echo "$(ts) [OK]    $*" >> "$LOG"; }
 
-# ── Email via msmtp ─────────────────────────────────────────
+# ── Domain detection ───────────────────────────────────────
+get_domain() {
+  # Try to detect domain from WordPress
+  if [ -f /var/www/html/wp-config.php ]; then
+    grep -oP "define\(\s*'WP_HOME',\s*'https?://\K[^/'\"]*" /var/www/html/wp-config.php 2>/dev/null | head -1
+  elif [ -f /var/www/wp-config.php ]; then
+    grep -oP "define\(\s*'WP_HOME',\s*'https?://\K[^/'\"]*" /var/www/wp-config.php 2>/dev/null | head -1
+  # Try Apache ServerName
+  elif command -v apache2ctl &>/dev/null; then
+    apache2ctl -S 2>/dev/null | grep -oP '(?<=\().*(?=\))' | grep -v "port\|127\.0\.0\.1" | head -1
+  # Try from SSL certificate
+  elif [ -f /etc/letsencrypt/live/*/fullchain.pem ]; then
+    openssl x509 -noout -subject -in /etc/letsencrypt/live/*/fullchain.pem 2>/dev/null | grep -oP '(?<=CN=)[^,]*' | head -1
+  fi
+}
+
+# ── Email via msmtp (HTML) ──────────────────────────────────
 send_alert() {
   local subject="$1"
   local body="$2"
@@ -37,11 +53,69 @@ send_alert() {
   host=$(hostname)
   local server_ip
   server_ip=$(hostname -I | awk '{print $1}')
-  local full_subject="[$host] $subject"
-  [ "$priority" = "critical" ] && full_subject="[CRITICAL] [$host] $subject"
+  local domain
+  domain=$(get_domain)
+  [ -z "$domain" ] && domain="unknown"
 
-  printf "Subject: %s\nMIME-Version: 1.0\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n--\nServer: %s (%s)\nTime: %s\nLog: %s" \
-    "${full_subject}" "${body}" "${host}" "${server_ip}" "$(ts)" "${LOG}" \
+  # Email icon and color based on priority
+  local icon="ℹ️"
+  local bgcolor="#4A90E2"  # Blue for normal
+  [ "$priority" = "critical" ] && icon="🚨" && bgcolor="#E74C3C"  # Red for critical
+  [ "$priority" = "warning" ] && icon="⚠️" && bgcolor="#F39C12"   # Orange for warning
+
+  local full_subject="$icon [$domain] $subject"
+  [ "$priority" = "critical" ] && full_subject="🚨 [CRITICAL] [$domain] $subject"
+
+  # Build HTML email
+  local html_body=$(cat <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+    .header { background: $bgcolor; color: white; padding: 20px; border-radius: 8px 8px 0 0; }
+    .header h1 { margin: 0; font-size: 24px; font-weight: bold; }
+    .header p { margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; }
+    .content { background: #f9f9f9; padding: 20px; border-left: 5px solid $bgcolor; }
+    .content p { margin: 10px 0; white-space: pre-wrap; font-family: 'Courier New', monospace; background: white; padding: 10px; border-radius: 4px; }
+    .footer { background: #f0f0f0; padding: 15px 20px; border-radius: 0 0 8px 8px; font-size: 12px; color: #666; }
+    .server-info { margin: 10px 0; }
+    .label { font-weight: bold; color: #333; }
+    .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; color: white; background: $bgcolor; margin: 5px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>$icon Server Alert</h1>
+      <p>Domain: <strong>$domain</strong></p>
+    </div>
+    <div class="content">
+      <div class="server-info">
+        <p><span class="label">Subject:</span> $subject</p>
+        <p><span class="label">Details:</span>${body}</p>
+      </div>
+    </div>
+    <div class="footer">
+      <div class="server-info">
+        <div><span class="label">Server:</span> $host ($server_ip)</div>
+        <div><span class="label">Domain:</span> $domain</div>
+        <div><span class="label">Time:</span> $(ts)</div>
+        <div><span class="label">Log:</span> $LOG</div>
+      </div>
+      <p style="margin-top: 15px; border-top: 1px solid #ddd; padding-top: 10px;">This is an automated alert from Graywell Design Watchdog Service</p>
+    </div>
+  </div>
+</body>
+</html>
+EOF
+)
+
+  printf "Subject: %s\nMIME-Version: 1.0\nContent-Type: text/html; charset=UTF-8\n\n%s" \
+    "${full_subject}" "${html_body}" \
     | /usr/bin/msmtp "$ALERT_EMAIL" 2>/dev/null \
     || log "[WARN] Failed to send alert email: $subject"
 }
