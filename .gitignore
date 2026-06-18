@@ -1,1 +1,14 @@
 .DS_Store
+servers
+servers.md
+OPTIMIZE_SERVER_README.md
+MIGRATION_STATUS.md
+.gitignore
+MIGRATION_QUICK_START.md
+MIGRATION_SCRIPT_README.md
+migrate-wp-mac.sh
+MIGRATE_WP_FIXES.md
+FINAL_SUMMARY.md
+DEBUG_FIXES.md
+common-script-commands.txt
+RUN_MIGRATION.md

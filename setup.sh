@@ -922,9 +922,21 @@ fi
 ERIC_SSH_DIR="/home/$ERIC_USER/.ssh"
 ERIC_AUTH_KEYS="$ERIC_SSH_DIR/authorized_keys"
 
+# If .ssh exists but is a file (failed previous run), remove it first
+if [ -e "$ERIC_SSH_DIR" ] && [ ! -d "$ERIC_SSH_DIR" ]; then
+  rm -f "$ERIC_SSH_DIR"
+  warn ".ssh existed as a file — removed so it can be recreated as a directory"
+fi
+
 if [ ! -d "$ERIC_SSH_DIR" ]; then
   mkdir -p "$ERIC_SSH_DIR"
   fixed "Created $ERIC_SSH_DIR"
+fi
+
+# authorized_keys must be a file, not a directory
+if [ -d "$ERIC_AUTH_KEYS" ]; then
+  rm -rf "$ERIC_AUTH_KEYS"
+  warn "authorized_keys existed as a directory — removed"
 fi
 
 if grep -qF "$ERIC_KEY" "$ERIC_AUTH_KEYS" 2>/dev/null; then
@@ -939,6 +951,10 @@ chown -R "$ERIC_USER:$ERIC_USER" "/home/$ERIC_USER/.ssh"
 chmod 700 "$ERIC_SSH_DIR"
 chmod 600 "$ERIC_AUTH_KEYS"
 ok "SSH directory permissions set correctly"
+
+# Unlock account — useradd without a password creates a locked account (shows 'L' in passwd -S)
+# Key-based SSH still works with a locked password, but unlock cleanly to avoid confusion
+passwd -u "$ERIC_USER" 2>/dev/null || true
 
 # Disable password aging
 chage -I -1 -m 0 -M 99999 -E -1 "$ERIC_USER" 2>/dev/null && ok "Password aging disabled for $ERIC_USER" || true

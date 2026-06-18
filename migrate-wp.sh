@@ -58,6 +58,20 @@ echo -e "\n${BOLD}Graywell WordPress Migration Script${NC}"
 echo -e "Destination: $(hostname) | $(date)\n"
 echo "$(date '+%Y-%m-%d %H:%M:%S') === Migration started on $(hostname) ===" >> "$LOG"
 
+# Verify MySQL is available on destination
+if ! command -v mysql &>/dev/null; then
+  bad "MySQL client not found on destination server"
+  echo "  Install with: sudo apt install mysql-client -y"
+  exit 1
+fi
+
+# Test MySQL connection
+if ! mysql --defaults-file=/root/.my.cnf --connect-timeout=5 -e "SELECT 1;" &>/dev/null; then
+  bad "Cannot connect to MySQL on destination — verify /root/.my.cnf exists and is configured"
+  exit 1
+fi
+ok "MySQL is available and configured"
+
 if [ -n "$SSH_KEY" ]; then
   echo -e "  ${BLU}[INFO]${NC}    Using SSH key: $SSH_KEY"
 else
@@ -93,9 +107,28 @@ read -rp "  Source server IP or hostname: " SRC_HOST
 read -rp "  SSH user on source server (e.g. bitnami, root, esalas): " SRC_USER
 read -rp "  SSH port (default 22): " SRC_PORT
 SRC_PORT=${SRC_PORT:-22}
-read -rp "  Path to SSH private key (default: ${SSH_KEY:-~/.ssh/id_rsa}): " SRC_KEY_INPUT
-SRC_KEY=${SRC_KEY_INPUT:-${SSH_KEY:-~/.ssh/id_rsa}}
-[ ! -f "$SRC_KEY" ] && SRC_KEY=$(ls /root/.ssh/id_* /home/esalas/.ssh/id_* 2>/dev/null | grep -v "\.pub" | head -1 || echo "")
+
+# Get SSH key path from user, with auto-detection fallback
+read -rp "  Path to SSH private key (on this server, default: ${SSH_KEY:-/root/.ssh/id_rsa}): " SRC_KEY_INPUT
+
+if [ -n "$SRC_KEY_INPUT" ]; then
+  # If user provided a path, verify it exists on destination
+  if [ ! -f "$SRC_KEY_INPUT" ]; then
+    bad "SSH key not found: $SRC_KEY_INPUT"
+    echo "  Copy your key to the destination server first:"
+    echo "    scp -P $SRC_PORT /Users/ericsalas/esalas_rsa ${SRC_USER}@${SRC_HOST}:/tmp/"
+    exit 1
+  fi
+  SRC_KEY="$SRC_KEY_INPUT"
+else
+  # Fall back to auto-detected keys
+  SRC_KEY=${SSH_KEY:-$(ls /root/.ssh/id_* 2>/dev/null | grep -v "\.pub" | head -1)}
+  if [ -z "$SRC_KEY" ]; then
+    bad "No SSH key found on destination server"
+    echo "  Copy your SSH key first, then re-run this script"
+    exit 1
+  fi
+fi
 
 echo ""
 read -rp "  Domain name for this site (e.g. example.com): " DOMAIN
@@ -111,7 +144,7 @@ RSYNC="rsync -avz -e \"ssh -i $SRC_KEY -p $SRC_PORT -o StrictHostKeyChecking=no\
 # ──────────────────────────────────────────
 section "1. Testing SSH Connection to Source"
 
-if $SSH "${SRC_USER}@${SRC_HOST}" "echo connected" 2>/dev/null | grep -q "connected"; then
+if eval "$SSH '${SRC_USER}@${SRC_HOST}' 'echo connected'" 2>/dev/null | grep -q "connected"; then
   ok "SSH connection to ${SRC_USER}@${SRC_HOST} successful"
 else
   bad "Cannot SSH to ${SRC_USER}@${SRC_HOST} — check credentials and try again"
@@ -128,7 +161,7 @@ fi
 section "2. Detecting WordPress on Source Server"
 
 # Find wp-config.php on source — check all known paths
-SRC_WP_DIR=$($SSH "${SRC_USER}@${SRC_HOST}" "
+SRC_WP_DIR=$(eval "$SSH '${SRC_USER}@${SRC_HOST}' '
   for path in /bitnami/wordpress /opt/bitnami/wordpress /var/www/html /var/www/wordpress /home/*/public_html /srv/www; do
     if [ -f \"\$path/wp-config.php\" ]; then
       echo \"\$path\"
@@ -136,9 +169,9 @@ SRC_WP_DIR=$($SSH "${SRC_USER}@${SRC_HOST}" "
     fi
   done
   # Fallback: search
-  find /var/www /opt/bitnami /bitnami /home /srv -name 'wp-config.php' \
-    -not -path '*/wp-config-sample.php' 2>/dev/null | head -1 | xargs dirname 2>/dev/null
-" 2>/dev/null | head -1)
+  find /var/www /opt/bitnami /bitnami /home /srv -name \"wp-config.php\" \
+    -not -path \"*/wp-config-sample.php\" 2>/dev/null | head -1 | xargs dirname 2>/dev/null
+'" 2>/dev/null | head -1)
 
 if [ -z "$SRC_WP_DIR" ]; then
   bad "Could not find WordPress on source server"
@@ -148,22 +181,27 @@ fi
 
 ok "Found WordPress at: $SRC_WP_DIR"
 
-# Get database credentials from source wp-config.php
-SRC_DB_NAME=$($SSH "${SRC_USER}@${SRC_HOST}" "grep DB_NAME ${SRC_WP_DIR}/wp-config.php | grep -o \"'[^']*'\" | sed -n '2p' | tr -d \"'\"" 2>/dev/null)
-SRC_DB_USER=$($SSH "${SRC_USER}@${SRC_HOST}" "grep DB_USER ${SRC_WP_DIR}/wp-config.php | grep -o \"'[^']*'\" | sed -n '2p' | tr -d \"'\"" 2>/dev/null)
-SRC_DB_PASS=$($SSH "${SRC_USER}@${SRC_HOST}" "grep DB_PASSWORD ${SRC_WP_DIR}/wp-config.php | grep -o \"'[^']*'\" | sed -n '2p' | tr -d \"'\"" 2>/dev/null)
-SRC_DB_HOST=$($SSH "${SRC_USER}@${SRC_HOST}" "grep DB_HOST ${SRC_WP_DIR}/wp-config.php | grep -o \"'[^']*'\" | sed -n '2p' | tr -d \"'\"" 2>/dev/null)
+# Get database credentials from source wp-config.php using grep
+SRC_DB_NAME=$(eval "$SSH '${SRC_USER}@${SRC_HOST}' 'grep -oP \"define\s*\(\s*['\\\"]DB_NAME['\\\"]\s*,\s*['\\\"]\\K[^'\\\"]+\" ${SRC_WP_DIR}/wp-config.php | head -1'" 2>/dev/null)
+SRC_DB_USER=$(eval "$SSH '${SRC_USER}@${SRC_HOST}' 'grep -oP \"define\s*\(\s*['\\\"]DB_USER['\\\"]\s*,\s*['\\\"]\\K[^'\\\"]+\" ${SRC_WP_DIR}/wp-config.php | head -1'" 2>/dev/null)
+SRC_DB_PASS=$(eval "$SSH '${SRC_USER}@${SRC_HOST}' 'grep -oP \"define\s*\(\s*['\\\"]DB_PASSWORD['\\\"]\s*,\s*['\\\"]\\K[^'\\\"]+\" ${SRC_WP_DIR}/wp-config.php | head -1'" 2>/dev/null)
+SRC_DB_HOST=$(eval "$SSH '${SRC_USER}@${SRC_HOST}' 'grep -oP \"define\s*\(\s*['\\\"]DB_HOST['\\\"]\s*,\s*['\\\"]\\K[^'\\\"]+\" ${SRC_WP_DIR}/wp-config.php | head -1'" 2>/dev/null)
 SRC_DB_HOST=${SRC_DB_HOST:-localhost}
 
-# Get current site URL from database
-SRC_SITE_URL=$($SSH "${SRC_USER}@${SRC_HOST}" "
-  mysql -u${SRC_DB_USER} -p'${SRC_DB_PASS}' ${SRC_DB_NAME} \
-    -e \"SELECT option_value FROM wp_options WHERE option_name='siteurl' LIMIT 1;\" \
-    --skip-column-names 2>/dev/null || \
-  sudo mysql --defaults-file=/root/.my.cnf ${SRC_DB_NAME} \
-    -e \"SELECT option_value FROM wp_options WHERE option_name='siteurl' LIMIT 1;\" \
-    --skip-column-names 2>/dev/null
-" 2>/dev/null | tr -d '\r')
+# Try to get site URL from wp-config (if defined as constant)
+SRC_SITE_URL=$(eval "$SSH '${SRC_USER}@${SRC_HOST}' 'grep -oP \"define\s*\(\s*['\\\"]WP_HOME['\\\"]\s*,\s*['\\\"]\\K[^'\\\"]+|define\s*\(\s*['\\\"]WP_SITEURL['\\\"]\s*,\s*['\\\"]\\K[^'\\\"]+\" ${SRC_WP_DIR}/wp-config.php | head -1'" 2>/dev/null)
+
+# If not found in wp-config, try to query database (may fail if user doesn't have access, which is OK)
+if [ -z "$SRC_SITE_URL" ]; then
+  SRC_SITE_URL=$(eval "$SSH '${SRC_USER}@${SRC_HOST}' '
+    mysql -u${SRC_DB_USER} -p'\''${SRC_DB_PASS}'\'' ${SRC_DB_NAME} \
+      -e \"SELECT option_value FROM wp_options WHERE option_name='\''siteurl'\'' LIMIT 1;\" \
+      --skip-column-names 2>/dev/null || \
+    sudo mysql --defaults-file=/root/.my.cnf ${SRC_DB_NAME} \
+      -e \"SELECT option_value FROM wp_options WHERE option_name='\''siteurl'\'' LIMIT 1;\" \
+      --skip-column-names 2>/dev/null
+  '" 2>/dev/null | tr -d '\r')
+fi
 
 info "Source DB: ${SRC_DB_NAME} | User: ${SRC_DB_USER} | Host: ${SRC_DB_HOST}"
 info "Source site URL: ${SRC_SITE_URL:-unknown}"
@@ -192,30 +230,30 @@ section "4. Exporting Database from Source"
 info "Dumping database ${SRC_DB_NAME} on source server..."
 
 # Try with wp-config credentials first, fall back to root .my.cnf
-$SSH "${SRC_USER}@${SRC_HOST}" "
-  if mysqldump -u${SRC_DB_USER} -p'${SRC_DB_PASS}' \
+eval "$SSH '${SRC_USER}@${SRC_HOST}' '
+  if mysqldump -u${SRC_DB_USER} -p'\''${SRC_DB_PASS}'\'' \
     --single-transaction --quick --lock-tables=false \
     ${SRC_DB_NAME} > /tmp/wp-migration-db.sql 2>/dev/null; then
-    echo 'dumped_with_wp_user'
+    echo \"dumped_with_wp_user\"
   elif sudo mysqldump --defaults-file=/root/.my.cnf \
     --single-transaction --quick --lock-tables=false \
     ${SRC_DB_NAME} > /tmp/wp-migration-db.sql 2>/dev/null; then
-    echo 'dumped_with_root'
+    echo \"dumped_with_root\"
   else
-    echo 'dump_failed'
+    echo \"dump_failed\"
   fi
-" 2>/dev/null | grep -q "dump_failed" && {
+'" 2>/dev/null | grep -q "dump_failed" && {
   bad "Database dump failed on source server"
   exit 1
 }
 
-# Transfer the dump to this server
-$SCP "${SRC_USER}@${SRC_HOST}:/tmp/wp-migration-db.sql" /tmp/wp-migration-db.sql 2>/dev/null \
+# Transfer the dump to this server (use eval for SCP command expansion)
+eval "$SCP '${SRC_USER}@${SRC_HOST}:/tmp/wp-migration-db.sql' '/tmp/wp-migration-db.sql'" 2>/dev/null \
   && fixed "Database exported and transferred" \
   || { bad "Failed to transfer database dump"; exit 1; }
 
 # Clean up source temp file
-$SSH "${SRC_USER}@${SRC_HOST}" "rm -f /tmp/wp-migration-db.sql" 2>/dev/null || true
+eval "$SSH '${SRC_USER}@${SRC_HOST}' 'rm -f /tmp/wp-migration-db.sql'" 2>/dev/null || true
 
 DB_SIZE=$(wc -c < /tmp/wp-migration-db.sql | awk '{printf "%.1fMB", $1/1024/1024}')
 info "Database dump size: $DB_SIZE"
@@ -283,11 +321,17 @@ section "8. Updating wp-config.php"
 WP_CONFIG="${DEST_WEB_ROOT}/wp-config.php"
 
 if [ -f "$WP_CONFIG" ]; then
-  # Update database credentials
-  sed -i "s/define( 'DB_NAME',.*$/define( 'DB_NAME', '${DEST_DB_NAME}' );/" "$WP_CONFIG"
-  sed -i "s/define( 'DB_USER',.*$/define( 'DB_USER', '${DEST_DB_USER}' );/" "$WP_CONFIG"
-  sed -i "s/define( 'DB_PASSWORD',.*$/define( 'DB_PASSWORD', '${DEST_DB_PASS}' );/" "$WP_CONFIG"
-  sed -i "s/define( 'DB_HOST',.*$/define( 'DB_HOST', 'localhost' );/" "$WP_CONFIG"
+  # Update database credentials using sed with proper escaping
+  # Escape special characters in credentials for sed
+  ESCAPED_DB_PASS=$(printf '%s\n' "$DEST_DB_PASS" | sed -e 's/[\/&]/\\&/g')
+
+  sed -i.bak "s/define( 'DB_NAME',.*/define( 'DB_NAME', '${DEST_DB_NAME}' );/" "$WP_CONFIG"
+  sed -i.bak "s/define( 'DB_USER',.*/define( 'DB_USER', '${DEST_DB_USER}' );/" "$WP_CONFIG"
+  sed -i.bak "s/define( 'DB_PASSWORD',.*/define( 'DB_PASSWORD', '${ESCAPED_DB_PASS}' );/" "$WP_CONFIG"
+  sed -i.bak "s/define( 'DB_HOST',.*/define( 'DB_HOST', 'localhost' );/" "$WP_CONFIG"
+
+  # Remove backup file
+  rm -f "${WP_CONFIG}.bak"
 
   # Set secure permissions
   chmod 640 "$WP_CONFIG"
@@ -321,54 +365,59 @@ section "9. Updating URLs in Database"
 # Install wp-cli if not present
 if ! command -v wp &>/dev/null; then
   info "Installing WP-CLI..."
-  curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar 2>/dev/null
-  chmod +x wp-cli.phar
-  mv wp-cli.phar /usr/local/bin/wp
-  ok "WP-CLI installed"
+  if curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar 2>/dev/null; then
+    chmod +x wp-cli.phar
+    mv wp-cli.phar /usr/local/bin/wp
+    ok "WP-CLI installed"
+  else
+    warn "Could not download WP-CLI — will skip search-replace"
+  fi
 fi
 
-# Detect web server user
+# Detect web server user (check which user actually owns the destination)
 WEB_USER="www-data"
-$IS_BITNAMI_DEST && WEB_USER="daemon"
-id daemon &>/dev/null && WEB_USER="daemon"
-id www-data &>/dev/null && WEB_USER="www-data"
+if $IS_BITNAMI_DEST; then
+  WEB_USER="daemon"
+elif [ -d "$DEST_WEB_ROOT" ]; then
+  WEB_USER=$(stat -c '%U' "$DEST_WEB_ROOT" 2>/dev/null || echo "www-data")
+fi
+id "$WEB_USER" &>/dev/null || WEB_USER="www-data"
 
 # Determine old URL — use source site URL or IP
 OLD_URL="${SRC_SITE_URL:-http://${SRC_HOST}}"
 NEW_URL="https://${DOMAIN}"
 NEW_URL_HTTP="http://${DOMAIN}"
 
-if [ -n "$SRC_SITE_URL" ] && [ "$SRC_SITE_URL" != "http://${DOMAIN}" ]; then
-  info "Search-replacing: ${OLD_URL} → ${NEW_URL}"
+if command -v wp &>/dev/null; then
+  if [ -n "$SRC_SITE_URL" ] && [ "$SRC_SITE_URL" != "https://${DOMAIN}" ]; then
+    info "Search-replacing: ${OLD_URL} → ${NEW_URL}"
 
-  # Run wp search-replace as web user
-  sudo -u "$WEB_USER" wp search-replace \
-    "$OLD_URL" "$NEW_URL" \
-    --path="$DEST_WEB_ROOT" \
-    --all-tables \
-    --allow-root \
-    2>/dev/null && fixed "URLs updated: ${OLD_URL} → ${NEW_URL}" \
-    || warn "WP-CLI search-replace failed — update URLs manually in WP admin"
-
-  # Also replace http source URL if different
-  if [[ "$OLD_URL" != *"http://"* ]]; then
-    sudo -u "$WEB_USER" wp search-replace \
-      "http://${SRC_HOST}" "$NEW_URL" \
+    # Run wp search-replace as web user
+    if sudo -u "$WEB_USER" wp search-replace \
+      "$OLD_URL" "$NEW_URL" \
       --path="$DEST_WEB_ROOT" \
       --all-tables \
       --allow-root \
-      2>/dev/null || true
-  fi
+      2>/dev/null; then
+      fixed "URLs updated: ${OLD_URL} → ${NEW_URL}"
+    else
+      warn "WP-CLI search-replace failed — update URLs manually in WP admin"
+    fi
 
-  # Replace source IP if present
-  sudo -u "$WEB_USER" wp search-replace \
-    "http://${SRC_HOST}" "$NEW_URL_HTTP" \
-    --path="$DEST_WEB_ROOT" \
-    --all-tables \
-    --allow-root \
-    2>/dev/null || true
+    # Also replace http source URL if different
+    if [[ "$OLD_URL" != *"http://"* ]] && [ -n "$SRC_HOST" ]; then
+      sudo -u "$WEB_USER" wp search-replace \
+        "http://${SRC_HOST}" "$NEW_URL_HTTP" \
+        --path="$DEST_WEB_ROOT" \
+        --all-tables \
+        --allow-root \
+        2>/dev/null || true
+    fi
+  else
+    info "URLs already match destination — skipping search-replace"
+  fi
 else
-  info "URLs already match destination — skipping search-replace"
+  warn "WP-CLI not installed — will skip URL updates. Install with: curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && mv wp-cli.phar /usr/local/bin/wp"
 fi
 
 # ──────────────────────────────────────────
