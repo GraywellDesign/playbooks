@@ -104,28 +104,13 @@ show_optimization_menu() {
     echo "  [M] Minimum (Apache + Swap only - safest)"
     echo "  [C] Cancel (exit without changes)"
     echo ""
+    echo "  Examples: '1 3 5' or '1,3,5' for multiple selections"
+    echo ""
 
-    read -p "Enter your choice [1-6/A/M/C]: " -r CHOICE
+    read -p "Enter your choice [1-6/A/M/C or space/comma-separated]: " -r CHOICE
 
+    # Handle special cases first
     case "$CHOICE" in
-        1)
-            OPTIMIZE_APACHE=true
-            ;;
-        2)
-            OPTIMIZE_PHP=true
-            ;;
-        3)
-            ADD_SWAP=true
-            ;;
-        4)
-            SETUP_WORDPRESS_CACHE=true
-            ;;
-        5)
-            INSTALL_REDIS=true
-            ;;
-        6)
-            VERIFY_OPCACHE=true
-            ;;
         [Aa])
             OPTIMIZE_APACHE=true
             OPTIMIZE_PHP=true
@@ -133,22 +118,51 @@ show_optimization_menu() {
             SETUP_WORDPRESS_CACHE=true
             INSTALL_REDIS=true
             VERIFY_OPCACHE=true
+            return 0
             ;;
         [Mm])
             OPTIMIZE_APACHE=true
             ADD_SWAP=true
             log_warning "Minimum mode selected (Apache + Swap only)"
+            return 0
             ;;
         [Cc])
             log_warning "Cancelled by user"
             exit 0
             ;;
-        *)
-            log_error "Invalid choice"
-            show_optimization_menu
-            return
-            ;;
     esac
+
+    # Parse comma or space-separated numbers
+    for num in $CHOICE; do
+        num=$(echo "$num" | tr -d ' ,')
+        case "$num" in
+            1)
+                OPTIMIZE_APACHE=true
+                ;;
+            2)
+                OPTIMIZE_PHP=true
+                ;;
+            3)
+                ADD_SWAP=true
+                ;;
+            4)
+                SETUP_WORDPRESS_CACHE=true
+                ;;
+            5)
+                INSTALL_REDIS=true
+                ;;
+            6)
+                VERIFY_OPCACHE=true
+                ;;
+            "")
+                ;; # Skip empty
+            *)
+                log_error "Invalid choice: $num"
+                show_optimization_menu
+                return
+                ;;
+        esac
+    done
 }
 
 ################################################################################
